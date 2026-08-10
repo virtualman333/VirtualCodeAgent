@@ -10,7 +10,7 @@ from typing import Literal
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage, BaseMessage, HumanMessage, ToolMessage
 
 from ..state import AgentState
 from ..config import Config
@@ -70,20 +70,86 @@ def make_system_prompt(workspace_dir: str) -> str:
     return _SYSTEM_PROMPT_TEMPLATE.format(env_info=env_info)
 
 
+# ============================================================
+# 上下文裁剪 (滑动窗口)
+# ============================================================
+
+# token 估算系数: 中文 ~1.5 字符/token, 英文 ~4 字符/token, 混合取 2.5
+_CHARS_PER_TOKEN = 2.5
+
+
+def _estimate_tokens(text: str) -> int:
+    """粗略估算 token 数"""
+    return max(1, int(len(text) / _CHARS_PER_TOKEN))
+
+
+def _message_tokens(msg: BaseMessage) -> int:
+    """估算一条消息的 token 数"""
+    base = _estimate_tokens(str(msg.content))
+    if isinstance(msg, ToolMessage):
+        base += 20
+    elif isinstance(msg, AIMessage) and msg.tool_calls:
+        base += _estimate_tokens(str(msg.tool_calls)) + 50
+    return base
+
+
+def _messages_to_text(messages: list[BaseMessage]) -> str:
+    """将消息列表转为可读文本，供 LLM 摘要"""
+    lines: list[str] = []
+    for msg in messages:
+        role = type(msg).__name__.replace("Message", "")
+        role_zh = {"Human": "用户", "AI": "Agent", "Tool": "工具", "System": "系统"}.get(
+            role, role
+        )
+        content = str(msg.content)
+        if isinstance(msg, ToolMessage):
+            name = getattr(msg, "name", "")
+            if len(content) > 400:
+                content = content[:400] + "...(截断)"
+            lines.append(f"[{role_zh}:{name}] {content}")
+        elif isinstance(msg, AIMessage) and msg.tool_calls:
+            tools = [tc.get("name", "?") for tc in msg.tool_calls]
+            if content.strip():
+                lines.append(f"[{role_zh}] {content[:200]} → 调用工具: {', '.join(tools)}")
+            else:
+                lines.append(f"[{role_zh}] 调用工具: {', '.join(tools)}")
+        else:
+            if len(content) > 300:
+                content = content[:300] + "...(截断)"
+            lines.append(f"[{role_zh}] {content}")
+    return "\n".join(lines)
+
+
+# ============================================================
+# CodingAgent
+# ============================================================
+
+
 class CodingAgent:
     """基于 LangGraph ReAct 模式的编码 Agent"""
 
+    # 上下文上限 (token), 可通过 MAX_CONTEXT_TOKENS 环境变量覆盖
+    _MAX_CONTEXT_TOKENS: int = int(
+        os.getenv("MAX_CONTEXT_TOKENS", str(100 * 1024))
+    )
+
     def __init__(self) -> None:
-        # 初始化 LLM
+        # 初始化 LLM (主模型，带工具绑定)
         self.llm = ChatOpenAI(
             model=Config.OPENAI_MODEL,
             base_url=Config.OPENAI_BASE_URL,
             api_key=Config.OPENAI_API_KEY,
             temperature=0.2,
         )
-
-        # 将全部工具绑定到 LLM (含 ask_user)
         self.llm_with_tools = self.llm.bind_tools(ALL_TOOLS)
+
+        # 摘要 LLM (用同一模型，无工具)
+        self._summary_llm = ChatOpenAI(
+            model=Config.OPENAI_MODEL,
+            base_url=Config.OPENAI_BASE_URL,
+            api_key=Config.OPENAI_API_KEY,
+            temperature=0.0,
+        )
 
         # 可执行工具 (不含 ask_user，它需要特殊处理)
         self._executable_tool_node = ToolNode(EXECUTABLE_TOOLS)
@@ -92,28 +158,167 @@ class CodingAgent:
         self.graph = self._build_graph()
 
     # --------------------------------------------------------
+    # 上下文裁剪  (含 LLM 语义摘要)
+    # --------------------------------------------------------
+
+    def _summarize_history(self, dropped: list[BaseMessage], prior_summary: str = "") -> str:
+        """
+        调用 LLM 对被裁剪的消息生成语义摘要。
+
+        Args:
+            dropped: 被裁剪掉的消息列表
+            prior_summary: 之前累积的摘要 (多次裁剪时合并)
+
+        Returns:
+            一段简洁的语义摘要
+        """
+        transcript = _messages_to_text(dropped)
+
+        # 限制摘要输入的 token 量 (防止摘要请求本身就超限)
+        if _estimate_tokens(transcript) > 15000:
+            transcript = transcript[:15000 * 3]  # ~15000 tokens worth of chars
+
+        prompt = f"""请用中文对以下对话历史生成一段简洁的语义摘要。
+
+规则:
+- 提取关键信息: 用户问了什么，你做了什么，产生了什么结果
+- 保留具体的文件名、路径、命令等关键参数
+- 忽略工具执行的冗长原始输出，只提炼结论
+- 控制在 300 字以内
+- 如果已有之前的摘要，请合并
+
+{prior_summary}
+
+--- 需要摘要的对话 ---
+{transcript}
+--- 结束 ---
+
+请直接输出摘要，不要加 "以下是摘要" 等前缀。"""
+
+        try:
+            response = self._summary_llm.invoke(prompt)
+            summary = str(response.content).strip()
+            return summary
+        except Exception as exc:
+            # 摘要失败时降级为规则提取
+            print(f"[VCA] LLM 摘要生成失败 ({type(exc).__name__})，使用规则提取替代")
+            parts: list[str] = []
+            for msg in dropped:
+                if isinstance(msg, HumanMessage):
+                    parts.append(f"用户: {str(msg.content)[:80]}")
+                elif isinstance(msg, AIMessage) and not msg.tool_calls and msg.content:
+                    parts.append(f"Agent: {str(msg.content)[:120]}")
+            return "\n".join(parts[:20])
+
+    def _trim_context(self, state: AgentState, max_tokens: int, keep_turns: int = 8) -> list[BaseMessage]:
+        """
+        上下文裁剪 含 LLM 语义摘要。
+
+        规则:
+        1. system prompt 始终保留
+        2. 压缩长工具结果 (>600 字符)
+        3. 仍超限则按 user 对话轮次裁剪，保留最近 keep_turns 轮
+        4. 被裁剪的轮次 → LLM 生成语义摘要 → 累积到 state.summary_history
+        5. 如果有累积摘要，注入为一条 SystemMessage
+
+        Returns:
+            裁剪后的消息列表
+        """
+        messages = state["messages"]
+        if not messages:
+            return messages
+
+        sys_msg = messages[0] if isinstance(messages[0], SystemMessage) else None
+        body = messages[1:] if sys_msg else messages
+        if not body:
+            return messages
+
+        # Step 1: 压缩工具结果
+        for i, msg in enumerate(body):
+            if isinstance(msg, ToolMessage) and len(str(msg.content)) > 600:
+                old_content = str(msg.content)
+                body[i] = ToolMessage(
+                    content=old_content[:500] + f"\n... (原始输出 {len(old_content)} 字符已被截断)",
+                    tool_call_id=msg.tool_call_id,
+                    name=getattr(msg, "name", ""),
+                )
+
+        # Step 2: 估算总 token
+        total = (_message_tokens(sys_msg) if sys_msg else 0) + sum(_message_tokens(m) for m in body)
+        prior = state.get("summary_history", "")
+        if prior:
+            total += _estimate_tokens(prior)
+        if total <= max_tokens:
+            # 没超限
+            result = [sys_msg] + body if sys_msg else body
+            if prior:
+                result.insert(1 if sys_msg else 0, SystemMessage(content=f"📋 [历史摘要]\n{prior}"))
+            return result
+
+        # Step 3: 按用户轮次裁剪
+        turn_boundaries: list[int] = []
+        for i, msg in enumerate(body):
+            if isinstance(msg, HumanMessage):
+                turn_boundaries.append(i)
+
+        if len(turn_boundaries) <= keep_turns:
+            # 轮次不多 说明是工具结果太大，激进压缩
+            for i, msg in enumerate(body):
+                if isinstance(msg, ToolMessage) and len(str(msg.content)) > 300:
+                    old_content = str(msg.content)
+                    body[i] = ToolMessage(
+                        content=old_content[:200] + f"\n... (原始 {len(old_content)} 字符被截断)",
+                        tool_call_id=msg.tool_call_id,
+                        name=getattr(msg, "name", ""),
+                    )
+            result = [sys_msg] + body if sys_msg else body
+            if prior:
+                result.insert(1 if sys_msg else 0, SystemMessage(content=f"📋 [历史摘要]\n{prior}"))
+            return result
+
+        # 保留最后 keep_turns 轮
+        trim_idx = turn_boundaries[-(keep_turns)]
+        dropped = body[:trim_idx]
+        kept = body[trim_idx:]
+
+        # Step 4: LLM 生成语义摘要
+        new_summary = self._summarize_history(dropped, prior_summary=prior)
+        # 累积到 state (下次裁剪时会合并)
+        state["summary_history"] = new_summary
+
+        # 注入摘要
+        kept.insert(0, SystemMessage(content=f"📋 [历史摘要]\n{new_summary}"))
+
+        return ([sys_msg] if sys_msg else []) + kept
+
+    # --------------------------------------------------------
     # 节点定义
     # --------------------------------------------------------
 
     def _agent_node(self, state: AgentState) -> dict:
         """
         Agent 节点: 调用 LLM 决定下一步行动。
-        LLM 可以:
-        - 调用工具 (返回 tool_calls)
-        - 直接回复 (返回纯文本)
         """
         messages = state["messages"]
         workspace = state["workspace_dir"]
 
-        # 确保 system prompt 存在
         if not messages or not isinstance(messages[0], SystemMessage):
             system_msg = SystemMessage(content=make_system_prompt(workspace))
             messages = [system_msg] + list(messages)
 
-        # 调用 LLM
-        response = self.llm_with_tools.invoke(messages)
+        # 上下文裁剪
+        trimmed = self._trim_context(
+            state,
+            max_tokens=self._MAX_CONTEXT_TOKENS,
+            keep_turns=8,
+        )
 
+        response = self.llm_with_tools.invoke(trimmed)
         return {"messages": [response]}
+
+    # --------------------------------------------------------
+    # 条件路由 (保持不变)
+    # --------------------------------------------------------
 
     def _should_continue(self, state: AgentState) -> Literal["tools", "ask_user", "respond"]:
         """

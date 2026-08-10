@@ -50,6 +50,10 @@ class AgentState(TypedDict):
     # None 表示无挂起问题
     pending_question: dict[str, Any] | None
 
+    # --- 上下文裁剪摘要 ---
+    # 当对话超长被裁剪时，LLM 生成的语义摘要（累积）
+    summary_history: str
+
 
 def create_initial_state(workspace_dir: str) -> AgentState:
     """创建初始状态"""
@@ -62,4 +66,5 @@ def create_initial_state(workspace_dir: str) -> AgentState:
         final_response="",
         workspace_dir=workspace_dir,
         pending_question=None,
+        summary_history="",
     )
