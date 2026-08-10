@@ -384,7 +384,6 @@ def _truncate_thinking(text: str) -> str:
     """将思考文本压缩为一行折叠摘要"""
     if not text:
         return "(无推理内容)"
-    # 去空白、取第一句
     compact = text.replace("\n", " ").strip()
     if len(compact) > _THINKING_COLLAPSED_MAX:
         compact = compact[:_THINKING_COLLAPSED_MAX] + "..."
@@ -477,7 +476,8 @@ def run_agent(
                     break
 
         except Exception as e:
-            console.print(f"[red bold]Error:[/red bold] {e}")
+            console.print("[red bold]Error:[/red bold]")
+            console.print(Text(str(e)))
             return
 
         # --- 汇总 ---
@@ -539,8 +539,11 @@ def _render_agent_step(node_output: dict, verbose: bool, round_num: int) -> None
             else:
                 collapsed = _truncate_thinking(thinking_text)
                 console.print(
-                    f"  [yellow]🧠[/yellow] [dim italic]{collapsed}[/dim] "
-                    f"[dim](输入 /verbose 展开)[/dim]"
+                    Text.assemble(
+                        "  ", ("🧠", "yellow"),
+                        " ", (collapsed, "dim italic"),
+                        " ", ("(输入 /verbose 展开)", "dim"),
+                    )
                 )
 
         if msg.tool_calls:
@@ -591,9 +594,11 @@ def _render_tools_step(node_output: dict, verbose: bool) -> None:
                 + f"\n... (共 {len(content)} 字符, 输入 /verbose 查看完整)"
             )
 
+        # verbose 用 Markdown 渲染，精简模式用 Text 纯文本 (避免方括号被解析为 Rich 标签)
+        body: Panel | Text = Text(result_preview)
         console.print(
             Panel(
-                f"[dim]{result_preview}[/dim]",
+                body,
                 title=f"[bold {status_color}]{status_icon} {msg.name}[/bold {status_color}]",
                 border_style=status_color,
                 padding=(1, 2),

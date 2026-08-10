@@ -2,22 +2,34 @@
 
 from __future__ import annotations
 
+import os
+import platform
+import sys
 from typing import Literal
 
 from langgraph.graph import StateGraph, END
 from langgraph.prebuilt import ToolNode
 from langchain_openai import ChatOpenAI
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
 from ..state import AgentState
 from ..config import Config
 from ..tools import ALL_TOOLS, EXECUTABLE_TOOLS
 
 # ============================================================
-# 系统提示词
+# 系统提示词模板
 # ============================================================
 
-SYSTEM_PROMPT = """你是一个控制台编码 Agent，帮助用户完成编程任务。
+_ENV_INFO = f"""## 当前运行环境
+- 操作系统: {platform.system()} {platform.release()} ({platform.machine()})
+- Shell: {os.environ.get('SHELL', os.environ.get('COMSPEC', 'unknown'))}
+- Python: {sys.version}
+- 工作目录: {{workspace_dir}}
+"""
+
+_SYSTEM_PROMPT_TEMPLATE = """你是一个控制台编码 Agent，帮助用户完成编程任务。
+
+{env_info}
 
 ## 工具箱
 
@@ -47,12 +59,15 @@ SYSTEM_PROMPT = """你是一个控制台编码 Agent，帮助用户完成编程�
 7. 遇到模棱两可的需求时，用 ask_user 向用户确认，不要自行猜测
 8. 每个响应只调用一个工具，或一次性完成不依赖前序结果的工具链
 9. 用 ask_user 时提供清晰的选项让用户选择，而不是开放式提问
-
-## 工作空间
-{workspace_dir}
+10. 根据环境信息使用正确的命令 (Windows 用 dir/tasklist/del, Linux 用 ls/ps/rm 等)
 
 请用中文回复用户。"""
-# ============================================================
+
+
+def make_system_prompt(workspace_dir: str) -> str:
+    """根据运行时环境动态生成 system prompt"""
+    env_info = _ENV_INFO.format(workspace_dir=workspace_dir)
+    return _SYSTEM_PROMPT_TEMPLATE.format(env_info=env_info)
 
 
 class CodingAgent:
