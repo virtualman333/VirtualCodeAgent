@@ -1,0 +1,32 @@
+[build-system]
+requires = ["setuptools>=68.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "virtual-code-agent"
+version = "0.1.0"
+description = "A console-based coding agent powered by LangGraph"
+readme = "README.md"
+requires-python = ">=3.11"
+license = { text = "MIT" }
+authors = [{ name = "vca" }]
+
+dependencies = [
+    "langgraph>=0.6.0",
+    "langchain-core>=0.3.0",
+    "langchain-openai>=0.3.0",
+    "python-dotenv>=1.0.0",
+    "rich>=13.0.0",
+    "colorama>=0.4.6",
+    "Pillow>=10.0.0",
+    "PyPDF2>=3.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[tool.setuptools.packages.find]
+where = ["src"]
