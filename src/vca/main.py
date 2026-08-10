@@ -828,14 +828,14 @@ def main() -> None:
                     workspace_dir = new_ws
                     state["workspace_dir"] = new_ws
                     # 重新注入 system prompt
-                    from .graph.workflow import SYSTEM_PROMPT
+                    from .graph.workflow import make_system_prompt
                     for msg in state["messages"]:
                         if isinstance(msg, SystemMessage) and "工作空间" in msg.content:
                             state["messages"].remove(msg)
                             break
                     state["messages"].insert(
                         0,
-                        SystemMessage(content=SYSTEM_PROMPT.format(workspace_dir=new_ws)),
+                        SystemMessage(content=make_system_prompt(new_ws)),
                     )
             elif cmd == "/config":
                 show_config_info(workspace_dir)

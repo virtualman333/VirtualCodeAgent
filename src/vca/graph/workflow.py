@@ -107,9 +107,7 @@ class CodingAgent:
 
         # 确保 system prompt 存在
         if not messages or not isinstance(messages[0], SystemMessage):
-            system_msg = SystemMessage(
-                content=SYSTEM_PROMPT.format(workspace_dir=workspace)
-            )
+            system_msg = SystemMessage(content=make_system_prompt(workspace))
             messages = [system_msg] + list(messages)
 
         # 调用 LLM
