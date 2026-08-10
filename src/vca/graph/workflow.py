@@ -72,13 +72,23 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一个控制台编码 Agent，帮助用户完
 9. 用 ask_user 时提供清晰的选项让用户选择，而不是开放式提问
 10. 根据环境信息使用正确的命令 (Windows 用 dir/tasklist/del, Linux 用 ls/ps/rm 等)
 
+## 工作空间使用规范（防污染）
+- 临时脚本 / 调试脚本 / 一次性日志：**必须**写到 `{workspace_dir}/.vca/scratch/` 子目录
+  - 该目录若不存在，先 `mkdir -p .vca/scratch` 创建
+- 禁止在仓库根目录直接写临时文件（如 `_split.py`、`_c_*.txt`、`_g_*.txt`、`_dump.txt` 等）
+- 完成任务后清理自己产生的临时产物（`rm .vca/scratch/<本次任务相关文件>`），不要残留
+- 正式产物 / 业务代码不在此限制内，按用户要求正常写
+
 请用中文回复用户。"""
 
 
 def make_system_prompt(workspace_dir: str) -> str:
     """根据运行时环境动态生成 system prompt"""
     env_info = _ENV_INFO.format(workspace_dir=workspace_dir)
-    return _SYSTEM_PROMPT_TEMPLATE.format(env_info=env_info)
+    return _SYSTEM_PROMPT_TEMPLATE.format(
+        env_info=env_info,
+        workspace_dir=workspace_dir,
+    )
 
 
 # ============================================================

@@ -453,30 +453,6 @@ def _fmt_duration(ms: float) -> str:
     return f"{ms / 1000:.1f}s"
 
 
-def _render_usage_line(usage: dict) -> None:
-    """渲染单次 LLM 调用的 token 明细 + 耗时"""
-    if not usage:
-        return
-    tokens = usage.get("total_tokens", 0)
-    if not tokens:
-        return  # 无 token 数据 (如未启用 usage 统计)
-
-    inp = _fmt_num(usage.get("input_tokens", 0))
-    out = _fmt_num(usage.get("output_tokens", 0))
-    total = _fmt_num(tokens)
-    dur = _fmt_duration(usage.get("duration_ms", 0))
-
-    console.print(
-        Text.assemble(
-            "  ", ("⚡", "cyan"),
-            " Token: ",
-            (f"输入 {inp} | 输出 {out} | 总计 {total}", "cyan"),
-            " | ",
-            (f"耗时 {dur}", "magenta"),
-        )
-    )
-
-
 def run_agent(
     agent_instance,
     state: AgentState,
@@ -514,20 +490,33 @@ def run_agent(
 
                     # --- agent 节点 (LLM 推理) ---
                     if node_name == "agent":
+                        is_new_round = False
                         for msg in node_output.get("messages", []):
                             if isinstance(msg, AIMessage) and msg.tool_calls:
                                 round_num += 1
+                                is_new_round = True
                                 break
-                        _render_agent_step(node_output, verbose)
+                        _render_agent_step(
+                            node_output,
+                            verbose,
+                            round_num=round_num,
+                            is_new_round=is_new_round,
+                        )
 
-                        # 显示本次 LLM 调用的 token 明细 + 耗时
+                        # 同步 LLM 回复回外部 state。
+                        # LangGraph stream() 不会把内部累积的消息写回传入的 dict，
+                        # 必须手动同步，否则下次问答会丢失本轮的 Agent 回复 → 上下文丢失。
+                        for msg in node_output.get("messages", []):
+                            if isinstance(msg, AIMessage):
+                                state["messages"].append(msg)
+
+                        # 累计 token (不逐轮显示, 任务结束后统一汇总)
                         usage = node_output.get("llm_usage") or {}
                         if usage:
                             sum_input += usage.get("input_tokens", 0) or 0
                             sum_output += usage.get("output_tokens", 0) or 0
                             sum_total += usage.get("total_tokens", 0) or 0
                             sum_llm_ms += usage.get("duration_ms", 0) or 0
-                            _render_usage_line(usage)
 
                     # --- tools 节点 (执行结果) ---
                     elif node_name == "tools":
@@ -537,6 +526,11 @@ def run_agent(
                                     total_tools += 1
                         _render_tools_step(node_output)
 
+                        # 同步工具结果回外部 state (原因同上: stream 不写回外部 dict)
+                        for msg in node_output.get("messages", []):
+                            if isinstance(msg, ToolMessage):
+                                state["messages"].append(msg)
+
                         # 工具耗时
                         tool_usage = node_output.get("tool_usage") or {}
                         if tool_usage:
@@ -544,7 +538,18 @@ def run_agent(
 
                     # --- ask_user 节点: 实时检测挂起 ---
                     elif node_name == "ask_user":
-                        pass  # render 在外层 pending_question 检查处理
+                        # LangGraph stream 不会把节点返回值写回外部 state，
+                        # 必须手动把挂起问题同步到 state，后续渲染/交互才能看到
+                        pq = node_output.get("pending_question")
+                        if pq:
+                            state["pending_question"] = pq
+                            # 立即提示用户 Agent 正在提问
+                            console.print(
+                                Text.assemble(
+                                    "  ", ("💬", "magenta"),
+                                    (" Agent 需要确认: ", "bold magenta"),
+                                )
+                            )
 
                     # --- respond 节点: 最终回答 ---
                     elif node_name == "respond":
@@ -571,12 +576,12 @@ def run_agent(
             console.print(Text(str(e)))
             return
 
-        # --- 汇总 (Token 明细 + 耗时) ---
+        # --- 汇总 (任务完成后的总 Token 消耗 + 耗时) ---
         if sum_total > 0:
             console.print()
             total_dur = _fmt_duration(sum_llm_ms + sum_tool_ms)
             parts = [
-                ("📊 本轮用量: ", "cyan"),
+                ("📊 总消耗: ", "cyan"),
                 (f"Token {_fmt_num(sum_input)}↑ / {_fmt_num(sum_output)}↓"
                  f" / 共 {_fmt_num(sum_total)}", "cyan"),
             ]
@@ -619,9 +624,19 @@ def run_agent(
 # 子渲染函数 (独立出来便于复用)
 # ============================================================
 
-def _render_agent_step(node_output: dict, verbose: bool) -> None:
+def _render_agent_step(
+    node_output: dict,
+    verbose: bool,
+    round_num: int = 0,
+    is_new_round: bool = False,
+) -> None:
     """渲染 agent 节点的 LLM 推理输出"""
     messages = node_output.get("messages", [])
+
+    # 新一轮开始: 打印轻量分隔标识, 让轮次边界清晰
+    if is_new_round and round_num > 0:
+        console.print(f"  [dim cyan]─── 第 {round_num} 轮 ───[/dim cyan]")
+
     for msg in messages:
         if not isinstance(msg, AIMessage):
             continue
