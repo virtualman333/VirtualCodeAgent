@@ -1,9 +1,44 @@
 """配置管理 - 从环境变量加载 LLM 和 Agent 配置"""
 
 import os
+import json
+from pathlib import Path
 from dotenv import load_dotenv
 
 load_dotenv()
+
+# 历史记录文件路径
+_HISTORY_FILE = Path.home() / ".vca_workspace_history.json"
+
+
+def _load_history() -> list[str]:
+    """加载历史工作空间记录"""
+    try:
+        if _HISTORY_FILE.exists():
+            data = json.loads(_HISTORY_FILE.read_text(encoding="utf-8"))
+            if isinstance(data, list):
+                return [p for p in data if os.path.isdir(p)][:10]
+    except Exception:
+        pass
+    return []
+
+
+def _save_history(paths: list[str]) -> None:
+    """保存工作空间历史记录"""
+    try:
+        # 去重、去无效、只保留最近10条
+        clean = []
+        seen = set()
+        for p in paths:
+            if os.path.isdir(p) and p not in seen:
+                clean.append(p)
+                seen.add(p)
+        _HISTORY_FILE.write_text(
+            json.dumps(clean[:10], ensure_ascii=False, indent=2),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
 
 
 class Config:
@@ -27,9 +62,34 @@ class Config:
         return True
 
     @classmethod
-    def display(cls) -> None:
+    def display(cls, workspace_dir: str | None = None) -> None:
         """打印当前配置（隐藏敏感信息）"""
-        print(f"Model: {cls.OPENAI_MODEL}")
-        print(f"Base URL: {cls.OPENAI_BASE_URL}")
-        print(f"Workspace: {os.path.abspath(cls.WORKSPACE_DIR)}")
-        print(f"Max Iterations: {cls.MAX_TOOL_ITERATIONS}")
+        ws = workspace_dir or cls.WORKSPACE_DIR
+        print(f"Model:        {cls.OPENAI_MODEL}")
+        print(f"Base URL:     {cls.OPENAI_BASE_URL}")
+        print(f"Workspace:    {os.path.abspath(ws)}")
+        print(f"Max Iter:     {cls.MAX_TOOL_ITERATIONS}")
+
+    @classmethod
+    def resolve_workspace(cls, path: str) -> str:
+        """解析并验证工作空间路径，返回绝对路径"""
+        abs_path = os.path.abspath(path)
+        if not os.path.exists(abs_path):
+            os.makedirs(abs_path, exist_ok=True)
+        return abs_path
+
+    @classmethod
+    def get_workspace_history(cls) -> list[str]:
+        """获取最近使用过的工作空间列表"""
+        return _load_history()
+
+    @classmethod
+    def add_workspace_to_history(cls, path: str) -> None:
+        """将路径加入历史记录"""
+        abs_path = os.path.abspath(path)
+        history = _load_history()
+        # 移到最前
+        if abs_path in history:
+            history.remove(abs_path)
+        history.insert(0, abs_path)
+        _save_history(history)
