@@ -44,6 +44,12 @@ class AgentState(TypedDict):
     # 工作空间路径
     workspace_dir: str
 
+    # --- AskUser 挂起字段 ---
+    # 当 LLM 调用 ask_user 时，挂起问题详情
+    # 格式: {"header": "...", "question": "...", "options": "...", "is_multi": bool, "tool_call_id": "..."}
+    # None 表示无挂起问题
+    pending_question: dict[str, Any] | None
+
 
 def create_initial_state(workspace_dir: str) -> AgentState:
     """创建初始状态"""
@@ -55,4 +61,5 @@ def create_initial_state(workspace_dir: str) -> AgentState:
         iteration=0,
         final_response="",
         workspace_dir=workspace_dir,
+        pending_question=None,
     )

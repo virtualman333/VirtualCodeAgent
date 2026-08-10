@@ -73,10 +73,11 @@ def bash(command: str, timeout: int = 120, description: str = "") -> str:
             command,
             shell=True,
             capture_output=True,
-            text=True,
             timeout=timeout,
             cwd=os.getcwd(),
             env=os.environ.copy(),
+            encoding="utf-8",
+            errors="replace",
         )
 
         parts = []

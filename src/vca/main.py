@@ -19,6 +19,7 @@ from langchain_core.messages import HumanMessage, AIMessage, SystemMessage, Tool
 from .config import Config
 from .state import create_initial_state, AgentState
 from .graph.workflow import create_coding_agent
+from . import storage
 
 # ============================================================
 # 控制台
@@ -238,6 +239,10 @@ def show_help(verbose: bool = False) -> None:
   [cyan]/workspace[/cyan]   - 显示工作空间详情
   [cyan]/cd[/cyan] <路径>    - 切换工作空间目录
   [cyan]/verbose[/cyan]     - 切换深度思考展开/折叠  {verbose_status}
+  [cyan]/history[/cyan]     - 查看对话历史记录
+  [cyan]/load[/cyan]        - 恢复上一次对话
+  [cyan]/load[/cyan] <编号>  - 恢复指定历史对话
+  [cyan]/save[/cyan]        - 手动保存当前对话
   [cyan]/config[/cyan]      - 显示当前配置
   [cyan]/exit[/cyan]        - 退出程序
 
@@ -247,6 +252,8 @@ def show_help(verbose: bool = False) -> None:
   • 列出所有 Python 文件
   • 运行 pytest 测试
   • 帮我写一个 Flask REST API
+
+[dim]对话记录自动保存在 ~/.vca/sessions/ 目录[/dim]
 """
     console.print(Panel(help_text, title="帮助", border_style="cyan"))
 
@@ -402,6 +409,7 @@ def run_agent(
 ) -> None:
     """
     运行 Agent 并显示带进度时间线的结果。
+    支持 LLM 通过 ask_user 工具向用户提问 —— 检测到后弹出交互式 UI。
 
     显示逻辑:
     - 默认 (verbose=False): 深度思考折叠为一行 [展开查看]
@@ -411,129 +419,56 @@ def run_agent(
     user_msg = HumanMessage(content=user_input)
     state["messages"].append(user_msg)
 
-    try:
-        with console.status("[bold green]Agent 推理中...[/bold green]", spinner="dots"):
-            steps = list(agent_instance.stream(state))
-    except Exception as e:
-        console.print(f"[red bold]Error:[/red bold] {e}")
-        return
+    # --- 外层循环: 处理 ask_user 暂停/恢复 ---
+    while True:
+        try:
+            with console.status("[bold green]Agent 推理中...[/bold green]", spinner="dots"):
+                steps = list(agent_instance.stream(state))
+        except Exception as e:
+            console.print(f"[red bold]Error:[/red bold] {e}")
+            return
 
-    # ---------- 解析步骤 ----------
-    round_num = 0          # 工具循环轮次
-    tool_count = 0         # 本轮工具计数
-    last_thinking = ""     # 上一轮 agent 节点的思考文本
+        # ---------- 解析步骤 ----------
+        round_num = 0
 
-    for step_idx, step in enumerate(steps):
-        for node_name, node_output in step.items():
+        for step in steps:
+            for node_name, node_output in step.items():
 
-            # --- agent 节点 (LLM 推理) ---
-            if node_name == "agent":
-                messages = node_output.get("messages", [])
-                for msg in messages:
-                    if not isinstance(msg, AIMessage):
-                        continue
+                # --- agent 节点 (LLM 推理) ---
+                if node_name == "agent":
+                    _render_agent_step(node_output, verbose, round_num)
+                    # 有工具调用时更新 round_num
+                    for msg in node_output.get("messages", []):
+                        if isinstance(msg, AIMessage) and msg.tool_calls:
+                            round_num += 1
+                            console.print(
+                                f"[bold blue]── 第 {round_num} 轮 ──[/bold blue]"
+                            )
+                            break
 
-                    # 有工具调用 → 标记新一轮
-                    if msg.tool_calls:
-                        round_num += 1
-                        tool_count = 0
-                        # 显示轮次标题
+                # --- tools 节点 (工具执行结果) ---
+                elif node_name == "tools":
+                    _render_tools_step(node_output, verbose)
+
+                # --- ask_user 节点 (用户交互拦截) ---
+                # ask_user 节点产生占位 ToolMessage "[AWAITING_USER_INPUT]"
+                # 这里不渲染它，由外层的 pending_question 检查统一处理
+
+                # --- respond 节点 (最终回复) ---
+                elif node_name == "respond":
+                    final = node_output.get("final_response", "")
+                    # 如果有挂起问题，不显示最终回复（占位文本）
+                    if final and not state.get("pending_question"):
                         console.print()
-                        console.print(
-                            f"[bold blue]── 第 {round_num} 轮 ──[/bold blue]"
+                        response_panel = Panel(
+                            Markdown(final),
+                            title="[bold green]✓ 最终回答[/bold green]",
+                            border_style="green",
+                            padding=(1, 3),
                         )
+                        console.print(response_panel)
 
-                    # LLM 推理内容 (tool_calls 之前或之后的文本)
-                    thinking_text = msg.content or ""
-                    if msg.tool_calls and msg.content:
-                        thinking_text = msg.content
-
-                    if thinking_text.strip():
-                        last_thinking = thinking_text
-                        if verbose:
-                            # 展开模式: 完整显示
-                            console.print(
-                                Panel(
-                                    Markdown(thinking_text),
-                                    title="[bold yellow]🧠 深度思考[/bold yellow]",
-                                    border_style="yellow",
-                                    padding=(1, 2),
-                                )
-                            )
-                        else:
-                            # 折叠模式: 一行摘要
-                            collapsed = _truncate_thinking(thinking_text)
-                            console.print(
-                                f"  [yellow]🧠[/yellow] [dim italic]{collapsed}[/dim] "
-                                f"[dim](输入 /verbose 展开)[/dim]"
-                            )
-
-                    # 计划调用的工具
-                    if msg.tool_calls:
-                        for tc in msg.tool_calls:
-                            tool_count += 1
-                            args_str = _format_tool_args(tc.get("args", {}))
-                            console.print(
-                                f"  [cyan][{tool_count}][/cyan] [bold]→ {tc['name']}[/bold]({args_str})"
-                            )
-
-            # --- tools 节点 (工具执行结果) ---
-            elif node_name == "tools":
-                messages = node_output.get("messages", [])
-                for msg in messages:
-                    if not isinstance(msg, ToolMessage):
-                        continue
-
-                    content = msg.content or "(无输出)"
-                    # 判断结果状态
-                    if content.startswith("[OK]"):
-                        status_icon = "✓"
-                        status_color = "green"
-                    elif content.startswith("[ERROR]") or content.startswith("[BLOCKED]"):
-                        status_icon = "✗"
-                        status_color = "red"
-                    elif content.startswith("[INFO]"):
-                        status_icon = "ℹ"
-                        status_color = "yellow"
-                    elif content.startswith("[ERR]"):
-                        status_icon = "✗"
-                        status_color = "red"
-                    else:
-                        status_icon = "✓"
-                        status_color = "green"
-
-                    # 结果内容: verbose 模式全量, 默认截断
-                    result_preview = content
-                    if not verbose and len(result_preview) > 600:
-                        result_preview = (
-                            result_preview[:600]
-                            + f"\n... (共 {len(content)} 字符, 输入 /verbose 查看完整)"
-                        )
-
-                    console.print(
-                        Panel(
-                            f"[dim]{result_preview}[/dim]",
-                            title=f"[bold {status_color}]{status_icon} {msg.name}[/bold {status_color}]",
-                            border_style=status_color,
-                            padding=(1, 2),
-                        )
-                    )
-
-            # --- respond 节点 (最终回复) ---
-            elif node_name == "respond":
-                final = node_output.get("final_response", "")
-                if final:
-                    console.print()
-                    response_panel = Panel(
-                        Markdown(final),
-                        title="[bold green]✓ 最终回答[/bold green]",
-                        border_style="green",
-                        padding=(1, 3),
-                    )
-                    console.print(response_panel)
-
-    # 打印步骤统计
-    if round_num > 0:
+        # --- 步骤完成后的统计 ---
         total_tools = sum(
             1
             for step in steps
@@ -541,10 +476,214 @@ def run_agent(
             if node_id == "tools"
             for _msg in output.get("messages", [])
         )
-        console.print(
-            f"[dim]共 {round_num} 轮推理, {total_tools} 次工具调用[/dim]"
+        if round_num > 0:
+            console.print(
+                f"[dim]共 {round_num} 轮推理, {total_tools} 次工具调用[/dim]"
+            )
+        console.print()
+
+        # --- 检查是否有挂起的问题 ---
+        pending = state.get("pending_question")
+        if not pending:
+            break  # 无挂起问题，正常结束
+
+        # --- 显示问题并收集用户回答 ---
+        answer = _render_ask_user(pending)
+        if answer is None:
+            # 用户取消
+            state["pending_question"] = None
+            console.print("[dim]用户取消了提问[/dim]")
+            break
+
+        # --- 将回答注入状态，继续循环 ---
+        state["messages"].append(
+            ToolMessage(
+                content=answer,
+                tool_call_id=pending["tool_call_id"],
+                name="ask_user",
+            )
         )
+        state["pending_question"] = None
+        console.print()
+
+
+# ============================================================
+# 子渲染函数 (独立出来便于复用)
+# ============================================================
+
+def _render_agent_step(node_output: dict, verbose: bool, round_num: int) -> None:
+    """渲染 agent 节点的 LLM 推理输出"""
+    messages = node_output.get("messages", [])
+    for msg in messages:
+        if not isinstance(msg, AIMessage):
+            continue
+
+        thinking_text = msg.content or ""
+
+        if thinking_text.strip():
+            if verbose:
+                console.print()
+                console.print(
+                    Panel(
+                        Markdown(thinking_text),
+                        title="[bold yellow]🧠 深度思考[/bold yellow]",
+                        border_style="yellow",
+                        padding=(1, 2),
+                    )
+                )
+            else:
+                collapsed = _truncate_thinking(thinking_text)
+                console.print(
+                    f"  [yellow]🧠[/yellow] [dim italic]{collapsed}[/dim] "
+                    f"[dim](输入 /verbose 展开)[/dim]"
+                )
+
+        if msg.tool_calls:
+            tool_count = 0
+            for tc in msg.tool_calls:
+                tool_count += 1
+                name = tc.get("name", tc.get("function", {}).get("name", "?"))
+                args = tc.get("args", tc.get("function", {}).get("arguments", {}))
+                if isinstance(args, str):
+                    try:
+                        import json
+                        args = json.loads(args)
+                    except Exception:
+                        pass
+                args_str = _format_tool_args(args if isinstance(args, dict) else {})
+                console.print(
+                    f"  [cyan][{tool_count}][/cyan] [bold]→ {name}[/bold]({args_str})"
+                )
+
+
+def _render_tools_step(node_output: dict, verbose: bool) -> None:
+    """渲染 tools 节点的执行结果"""
+    messages = node_output.get("messages", [])
+    for msg in messages:
+        if not isinstance(msg, ToolMessage):
+            continue
+
+        content = msg.content or "(无输出)"
+        if content == "[AWAITING_USER_INPUT]":
+            continue  # ask_user 的占位消息，不渲染
+
+        # 状态判断
+        if content.startswith("[OK]"):
+            status_icon, status_color = "✓", "green"
+        elif content.startswith("[ERROR]") or content.startswith("[BLOCKED]"):
+            status_icon, status_color = "✗", "red"
+        elif content.startswith("[INFO]"):
+            status_icon, status_color = "ℹ", "yellow"
+        elif content.startswith("[ERR]"):
+            status_icon, status_color = "✗", "red"
+        else:
+            status_icon, status_color = "✓", "green"
+
+        result_preview = content
+        if not verbose and len(result_preview) > 600:
+            result_preview = (
+                result_preview[:600]
+                + f"\n... (共 {len(content)} 字符, 输入 /verbose 查看完整)"
+            )
+
+        console.print(
+            Panel(
+                f"[dim]{result_preview}[/dim]",
+                title=f"[bold {status_color}]{status_icon} {msg.name}[/bold {status_color}]",
+                border_style=status_color,
+                padding=(1, 2),
+            )
+        )
+
+
+def _render_ask_user(pending: dict) -> str | None:
+    """
+    渲染 ask_user 交互式问题，收集用户回答。
+
+    返回用户回答文本，或 None（用户取消）。
+    """
+    header = pending.get("header", "确认")
+    question = pending.get("question", "")
+    options = pending.get("options", [])
+    is_multi = pending.get("is_multi", False)
+
     console.print()
+
+    # 构建 Panel 内容
+    question_body = f"[bold]{question}[/bold]"
+
+    console.print(
+        Panel(question_body, title=f"[bold magenta]💬 {header}[/bold magenta]", border_style="magenta")
+    )
+
+    # --- 有预设选项 → 编号选择 ---
+    if options:
+        console.print()
+        for i, opt in enumerate(options, 1):
+            console.print(f"  [cyan]{i}[/cyan]. {opt}")
+
+        # 自定义回答选项
+        custom_idx = len(options) + 1
+        skip_idx = len(options) + 2
+        console.print(f"  [cyan]{custom_idx}[/cyan]. 自定义回答")
+        console.print(f"  [cyan]{skip_idx}[/cyan]. 跳过")
+        console.print()
+
+        if is_multi:
+            console.print("[dim]多选: 可用逗号分隔编号，如 1,3,4[/dim]")
+
+        while True:
+            try:
+                choice = Prompt.ask("请选择", default="1").strip()
+            except (KeyboardInterrupt, EOFError):
+                return None
+
+            if choice == str(skip_idx):
+                return "[用户选择跳过]"
+
+            if choice == str(custom_idx):
+                # 递归到自由输入
+                return _ask_user_free_input()
+
+            # 多选解析
+            if is_multi and "," in choice:
+                selected = []
+                for part in choice.split(","):
+                    part = part.strip()
+                    try:
+                        idx = int(part) - 1
+                        if 0 <= idx < len(options):
+                            selected.append(options[idx])
+                    except ValueError:
+                        pass
+                if selected:
+                    return "用户选择了: " + ", ".join(selected)
+
+            # 单选
+            try:
+                idx = int(choice) - 1
+                if 0 <= idx < len(options):
+                    return f"用户选择了: {options[idx]}"
+            except ValueError:
+                pass
+
+            console.print(f"[red]无效选项，请输入 1-{skip_idx}[/red]")
+
+    # --- 无预设选项 → 自由输入 ---
+    return _ask_user_free_input()
+
+
+def _ask_user_free_input() -> str | None:
+    """收集用户的自由文本回答"""
+    console.print("[dim]请输入你的回答 (直接回车跳过):[/dim]")
+    try:
+        answer = Prompt.ask(">").strip()
+    except (KeyboardInterrupt, EOFError):
+        return None
+
+    if answer:
+        return f"用户回答: {answer}"
+    return "[用户选择跳过]"
 
 
 # ============================================================
@@ -589,7 +728,30 @@ def main() -> None:
     # 4. 创建初始状态
     state = create_initial_state(workspace_dir)
 
-    # 5. 显示界面
+    # 5. 询问是否恢复上次会话
+    session_id: str | None = None
+    last_session = storage.get_last_session()
+    if last_session and last_session.get("messages"):
+        msg_count = len(last_session["messages"])
+        last_ws = last_session.get("workspace_dir", "")
+        last_title = last_session.get("title", "未命名")
+
+        console.print(f"[dim]发现上次会话: {last_title} ({msg_count} 条消息)[/dim]")
+        if last_ws and os.path.isdir(last_ws):
+            console.print(f"[dim]  原工作空间: {last_ws}[/dim]")
+
+        if Confirm.ask("是否恢复上次对话？", default=True):
+            state["messages"] = last_session.get("messages", [])
+            if last_ws:
+                # 如果工作空间相同，沿用
+                if os.path.abspath(last_ws) == os.path.abspath(workspace_dir):
+                    state["workspace_dir"] = workspace_dir
+            session_id = storage.list_sessions(1)[0]["id"] if storage.list_sessions(1) else None
+            console.print("[green]✓ 对话已恢复[/green]\n")
+        else:
+            console.print("[dim]已跳过恢复[/dim]\n")
+
+    # 6. 显示界面
     console.clear()
     show_banner()
 
@@ -607,17 +769,20 @@ def main() -> None:
     )
     console.print()
 
-    # 6. 主事件循环
+    # 7. 主事件循环
     while True:
-        # 动态提示符: 显示工作空间简称 + 模式标记
+        # 动态提示符: 显示工作空间简称
         ws_name = os.path.basename(workspace_dir) or workspace_dir
-        mode_tag = "" if verbose else ""
         prompt = f"[bold cyan]{ws_name}[/bold cyan] > "
 
         try:
             user_input = console.input(prompt).strip()
         except (KeyboardInterrupt, EOFError):
-            console.print("\n[yellow]再见![/yellow]")
+            # 退出前自动保存
+            if session_id or state.get("messages", []):
+                sid = storage.auto_save(state, session_id)
+                console.print(f"\n[dim]对话已自动保存 ({sid})[/dim]")
+            console.print("[yellow]再见![/yellow]")
             break
 
         if not user_input:
@@ -627,12 +792,16 @@ def main() -> None:
         if user_input.startswith("/"):
             cmd = user_input.lower().split()[0]
             if cmd == "/exit":
+                if session_id or state.get("messages", []):
+                    sid = storage.auto_save(state, session_id)
+                    console.print(f"[dim]对话已自动保存 ({sid})[/dim]")
                 console.print("[yellow]再见![/yellow]")
                 break
             elif cmd == "/help":
                 show_help(verbose=verbose)
             elif cmd == "/clear":
                 state = create_initial_state(workspace_dir)
+                session_id = None
                 console.print("[green]对话历史已清除[/green]")
             elif cmd == "/workspace":
                 show_workspace_info(workspace_dir, verbose=True)
@@ -660,6 +829,24 @@ def main() -> None:
                     )
             elif cmd == "/config":
                 show_config_info(workspace_dir)
+            elif cmd == "/history":
+                _show_history()
+            elif cmd == "/save":
+                sid = storage.auto_save(state, session_id)
+                session_id = sid
+                console.print(f"[green]✓ 对话已保存 ({sid})[/green]")
+            elif cmd == "/load":
+                parts = user_input.split(maxsplit=1)
+                index_str = parts[1].strip() if len(parts) > 1 else ""
+                if index_str:
+                    _load_session_by_index(
+                        index_str, state, workspace_dir, session_id
+                    )
+                else:
+                    sid = _load_last_session(state)
+                    if sid:
+                        session_id = sid
+                        workspace_dir = state["workspace_dir"]
             else:
                 console.print(f"[red]未知命令: {user_input}[/red]")
             console.print()
@@ -667,7 +854,104 @@ def main() -> None:
 
         # 运行 Agent
         run_agent(agent, state, user_input, verbose=verbose)
+        # 每次交互后自动保存
+        session_id = storage.auto_save(state, session_id)
         console.print()
+
+
+# ============================================================
+# 历史记录 UI 辅助
+# ============================================================
+
+def _show_history() -> None:
+    """显示历史会话列表"""
+    sessions = storage.list_sessions()
+    if not sessions:
+        console.print("[dim]暂无历史对话记录[/dim]")
+        return
+
+    table = Table(title="对话历史记录", box=box.ROUNDED)
+    table.add_column("#", style="cyan", width=3)
+    table.add_column("时间", style="dim", width=18)
+    table.add_column("标题", style="white", width=40)
+    table.add_column("消息数", justify="right", width=8)
+    table.add_column("工作空间", style="dim")
+
+    for i, s in enumerate(sessions, 1):
+        ws = s.get("workspace", "")
+        # 缩短工作空间路径
+        home = str(Path.home())
+        if ws.startswith(home):
+            ws = "~" + ws[len(home):]
+        elif len(ws) > 40:
+            ws = "..." + ws[-37:]
+
+        table.add_row(
+            str(i),
+            s.get("updated_at", ""),
+            s.get("title", "")[:40],
+            str(s.get("message_count", 0)),
+            ws,
+        )
+
+    console.print(table)
+    console.print(f"[dim]共 {len(sessions)} 条记录 | 使用 /load <编号> 恢复 | 删除需手动清理 ~/.vca/sessions/[/dim]")
+
+
+def _load_session_by_index(
+    index_str: str, state: AgentState, workspace_dir: str, current_sid: str | None
+) -> None:
+    """按编号加载历史会话"""
+    sessions = storage.list_sessions()
+    try:
+        idx = int(index_str) - 1
+        if idx < 0 or idx >= len(sessions):
+            console.print(f"[red]无效编号，请输入 1-{len(sessions)}[/red]")
+            return
+    except ValueError:
+        console.print(f"[red]无效编号: {index_str}[/red]")
+        return
+
+    sid = sessions[idx]["id"]
+    loaded = storage.load_session(sid)
+    if not loaded:
+        console.print(f"[red]会话加载失败: {sid}[/red]")
+        return
+
+    # 当前对话先保存
+    if current_sid or state.get("messages", []):
+        storage.auto_save(state, current_sid)
+
+    state["messages"] = loaded.get("messages", [])
+    old_ws = loaded.get("workspace_dir", "")
+    if old_ws and os.path.isdir(old_ws):
+        state["workspace_dir"] = old_ws
+    console.print(
+        f"[green]✓ 已恢复会话: {sessions[idx].get('title', '未命名')} ({sessions[idx].get('message_count', 0)} 条消息)[/green]"
+    )
+
+
+def _load_last_session(state: AgentState) -> str | None:
+    """加载最近一次会话，返回 session_id"""
+    sessions = storage.list_sessions(1)
+    if not sessions:
+        console.print("[dim]暂无历史对话记录[/dim]")
+        return None
+
+    sid = sessions[0]["id"]
+    loaded = storage.load_session(sid)
+    if not loaded:
+        console.print("[red]会话加载失败[/red]")
+        return None
+
+    state["messages"] = loaded.get("messages", [])
+    old_ws = loaded.get("workspace_dir", "")
+    if old_ws and os.path.isdir(old_ws):
+        state["workspace_dir"] = old_ws
+    console.print(
+        f"[green]✓ 已恢复会话: {sessions[0].get('title', '未命名')} ({sessions[0].get('message_count', 0)} 条消息)[/green]"
+    )
+    return sid
 
 
 if __name__ == "__main__":

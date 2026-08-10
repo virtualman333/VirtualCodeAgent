@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from ..state import AgentState
 from ..config import Config
-from ..tools import ALL_TOOLS
+from ..tools import ALL_TOOLS, EXECUTABLE_TOOLS
 
 # ============================================================
 # 系统提示词
@@ -34,6 +34,9 @@ SYSTEM_PROMPT = """你是一个控制台编码 Agent，帮助用户完成编程�
 ▶️ 执行与验证:
 - `bash`          — 万能工具: 跑测试、构建、lint、git 操作等
 
+💬 用户交互:
+- `ask_user`      — 向用户提问，用于澄清模糊需求或确认关键决策
+
 ## 工作规则
 1. 在执行文件操作前，先用 Glob/Grep 了解项目结构
 2. 写代码: 大文件用 Write，小改动用 Edit
@@ -41,7 +44,9 @@ SYSTEM_PROMPT = """你是一个控制台编码 Agent，帮助用户完成编程�
 4. 修改代码: 先用 Read 确认内容 → 再用 Edit 精确替换
 5. 写入文件后，用 Bash 运行测试/构建验证结果
 6. 遇到错误时分析原因并尝试修复
-7. 每个响应只调用一个工具，或一次性完成不依赖前序结果的工具链
+7. 遇到模棱两可的需求时，用 ask_user 向用户确认，不要自行猜测
+8. 每个响应只调用一个工具，或一次性完成不依赖前序结果的工具链
+9. 用 ask_user 时提供清晰的选项让用户选择，而不是开放式提问
 
 ## 工作空间
 {workspace_dir}
@@ -62,8 +67,11 @@ class CodingAgent:
             temperature=0.2,
         )
 
-        # 将工具绑定到 LLM
+        # 将全部工具绑定到 LLM (含 ask_user)
         self.llm_with_tools = self.llm.bind_tools(ALL_TOOLS)
+
+        # 可执行工具 (不含 ask_user，它需要特殊处理)
+        self._executable_tool_node = ToolNode(EXECUTABLE_TOOLS)
 
         # 构建工作流图
         self.graph = self._build_graph()
@@ -94,26 +102,80 @@ class CodingAgent:
 
         return {"messages": [response]}
 
-    def _should_continue(self, state: AgentState) -> Literal["tools", "respond"]:
+    def _should_continue(self, state: AgentState) -> Literal["tools", "ask_user", "respond"]:
         """
-        条件边: 判断是继续调用工具还是结束。
+        条件边: 判断下一步走向。
 
-        - 如果最后一条消息包含 tool_calls -> 执行工具
-        - 否则 -> 直接响应
+        - ask_user 工具调用 → 走 ask_user 节点 (暂停等用户回答)
+        - 其他工具调用 → 走 tools 节点
+        - 无工具调用 → 走 respond 节点 (结束)
         """
         last_message = state["messages"][-1]
 
         if isinstance(last_message, AIMessage) and last_message.tool_calls:
+            for tc in last_message.tool_calls:
+                if tc.get("name") == "ask_user":
+                    return "ask_user"
             return "tools"
         return "respond"
 
     def _tool_node(self, state: AgentState) -> dict:
         """
-        工具执行节点: 使用 ToolNode 执行 LLM 请求的工具调用。
+        工具执行节点: 执行 LLM 请求的工具调用 (不含 ask_user)。
         """
-        tool_node = ToolNode(ALL_TOOLS)
-        result = tool_node.invoke(state)
+        result = self._executable_tool_node.invoke(state)
         return result
+
+    def _ask_user_node(self, state: AgentState) -> dict:
+        """
+        AskUser 节点: 拦截 ask_user 调用，将问题信息存入状态，
+        等待主循环中的用户交互。
+
+        不在这里弹出 UI —— 只记录数据，由 main.py 的 run_agent 处理。
+        """
+        last_message = state["messages"][-1]
+        if not isinstance(last_message, AIMessage) or not last_message.tool_calls:
+            return {"pending_question": None}
+
+        for tc in last_message.tool_calls:
+            if tc.get("name") != "ask_user":
+                continue
+
+            args = tc.get("args", {})
+            question = args.get("question", "")
+            header = args.get("header", "确认")
+            options_raw = str(args.get("options", "")).strip()
+
+            # 解析 options: "A|B|C" 或 "[可多选] A|B|C"
+            is_multi = False
+            if options_raw.startswith("[可多选]") or options_raw.startswith("[多选]"):
+                is_multi = True
+                options_raw = options_raw.split("]", 1)[-1].strip()
+            elif options_raw.startswith("[multi]"):
+                is_multi = True
+                options_raw = options_raw[7:].strip()
+
+            option_list = [o.strip() for o in options_raw.split("|") if o.strip()]
+
+            return {
+                "pending_question": {
+                    "header": header,
+                    "question": question,
+                    "options": option_list,
+                    "is_multi": is_multi,
+                    "tool_call_id": tc.get("id", ""),
+                },
+                # 同时添加一条占位消息，让 stream 循环能进入下一个节点
+                "messages": [
+                    ToolMessage(
+                        content="[AWAITING_USER_INPUT]",
+                        tool_call_id=tc.get("id", ""),
+                        name="ask_user",
+                    )
+                ],
+            }
+
+        return {"pending_question": None}
 
     def _respond_node(self, state: AgentState) -> dict:
         """
@@ -140,25 +202,30 @@ class CodingAgent:
         # 添加节点
         workflow.add_node("agent", self._agent_node)
         workflow.add_node("tools", self._tool_node)
+        workflow.add_node("ask_user", self._ask_user_node)
         workflow.add_node("respond", self._respond_node)
 
         # 设置入口
         workflow.set_entry_point("agent")
 
-        # agent -> tools 或 respond
+        # agent → tools / ask_user / respond (三路分支)
         workflow.add_conditional_edges(
             "agent",
             self._should_continue,
             {
                 "tools": "tools",
+                "ask_user": "ask_user",
                 "respond": "respond",
             },
         )
 
-        # tools -> agent (循环)
+        # tools → agent (循环)
         workflow.add_edge("tools", "agent")
 
-        # respond -> END
+        # ask_user → respond (暂停后直接结束，由主循环处理用户回答后再重新进入)
+        workflow.add_edge("ask_user", "respond")
+
+        # respond → END
         workflow.add_edge("respond", END)
 
         return workflow.compile()
