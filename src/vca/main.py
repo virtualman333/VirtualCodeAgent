@@ -20,6 +20,8 @@ from .config import Config
 from .state import create_initial_state, AgentState
 from .graph.workflow import create_coding_agent
 from . import storage
+from .mcp.manager import mcp_manager
+from .skills.manager import discover_skills, get_all_skills
 
 # ============================================================
 # 控制台
@@ -243,6 +245,8 @@ def show_help(verbose: bool = False) -> None:
   [cyan]/load[/cyan]        - 恢复上一次对话
   [cyan]/load[/cyan] <编号>  - 恢复指定历史对话
   [cyan]/save[/cyan]        - 手动保存当前对话
+  [cyan]/skills[/cyan]      - 查看可用的专业技能
+  [cyan]/mcp[/cyan]         - 查看 MCP server 连接状态
   [cyan]/config[/cyan]      - 显示当前配置
   [cyan]/exit[/cyan]        - 退出程序
 
@@ -839,6 +843,10 @@ def main() -> None:
                     )
             elif cmd == "/config":
                 show_config_info(workspace_dir)
+            elif cmd == "/skills":
+                _show_skills()
+            elif cmd == "/mcp":
+                _show_mcp()
             elif cmd == "/history":
                 _show_history()
             elif cmd == "/save":
@@ -867,6 +875,39 @@ def main() -> None:
         # 每次交互后自动保存
         session_id = storage.auto_save(state, session_id)
         console.print()
+
+
+# ============================================================
+# Skills / MCP UI 辅助
+# ============================================================
+
+def _show_skills() -> None:
+    """显示可用 Skills"""
+    skills = get_all_skills()
+    if not skills:
+        console.print("[dim]暂无可用 Skills[/dim]")
+        console.print(
+            "[dim]创建方法: 在 ~/.vca/skills/ 或项目 .vca/skills/ 目录下\n"
+            "添加 <skill_name>/SKILL.md 文件即可[/dim]"
+        )
+        return
+
+    table = Table(title=f"可用的专业技能 ({len(skills)})", box=box.ROUNDED)
+    table.add_column("名称", style="cyan")
+    table.add_column("描述", style="white")
+    table.add_column("来源", style="dim")
+
+    for s in skills:
+        source = "用户级" if ".vca" in str(s.path) and "home" not in str(s.path) else "项目级"
+        table.add_row(s.name, s.description or "(无描述)", source)
+
+    console.print(table)
+    console.print("[dim]Agent 可用 list_skills / load_skill 工具加载技能[/dim]")
+
+
+def _show_mcp() -> None:
+    """显示 MCP 连接状态"""
+    console.print(Text(mcp_manager.status_text()))
 
 
 # ============================================================

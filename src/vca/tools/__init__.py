@@ -1,4 +1,4 @@
-"""Agent 工具集 — 7 个核心工具"""
+"""Agent 工具集 — 内置工具 + 动态扩展"""
 
 # 📖 阅读与理解
 from .read_tool import read_file
@@ -16,6 +16,9 @@ from .bash_tool import bash
 # 💬 用户交互
 from .ask_user_tool import ask_user
 
+# 🎯 Skills (可插拔专业技能)
+from ..skills.manager import list_skills, load_skill
+
 __all__ = [
     "read_file",
     "glob_files",
@@ -24,10 +27,12 @@ __all__ = [
     "write_file",
     "bash",
     "ask_user",
+    "list_skills",
+    "load_skill",
 ]
 
-# 所有工具注册给 LangGraph 使用
-ALL_TOOLS = [
+# 内置工具 (固定注册)
+BUILTIN_TOOLS = [
     read_file,
     glob_files,
     grep_content,
@@ -37,12 +42,11 @@ ALL_TOOLS = [
     ask_user,
 ]
 
+# Skill 工具
+SKILL_TOOLS = [list_skills, load_skill]
+
+# 全部工具注册给 LangGraph 使用 (MCP 工具由工作流动态追加)
+ALL_TOOLS = BUILTIN_TOOLS + SKILL_TOOLS
+
 # 可执行工具 (不含 ask_user，它需要特殊拦截)
-EXECUTABLE_TOOLS = [
-    read_file,
-    glob_files,
-    grep_content,
-    edit_file,
-    write_file,
-    bash,
-]
+EXECUTABLE_TOOLS = [t for t in ALL_TOOLS if t.name != "ask_user"]

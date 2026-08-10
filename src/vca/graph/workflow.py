@@ -14,7 +14,8 @@ from langchain_core.messages import AIMessage, SystemMessage, BaseMessage, Human
 
 from ..state import AgentState
 from ..config import Config
-from ..tools import ALL_TOOLS, EXECUTABLE_TOOLS
+from ..tools import ALL_TOOLS, EXECUTABLE_TOOLS, SKILL_TOOLS
+from ..mcp.manager import mcp_manager
 
 # ============================================================
 # 系统提示词模板
@@ -48,6 +49,14 @@ _SYSTEM_PROMPT_TEMPLATE = """你是一个控制台编码 Agent，帮助用户完
 
 💬 用户交互:
 - `ask_user`      — 向用户提问，用于澄清模糊需求或确认关键决策
+
+🎯 专业技能 (Skills):
+- `list_skills`   — 列出可用的专业技能 (如 web-scraping、docker 等)
+- `load_skill`    — 加载指定技能到上下文 (需要专业领域知识时使用)
+
+🔌 外部工具 (MCP):
+- 已连接的 MCP servers 提供的工具，调用方式与内置工具相同
+- 可用 `/mcp` 命令查看已连接的 MCP servers
 
 ## 工作规则
 1. 在执行文件操作前，先用 Glob/Grep 了解项目结构
@@ -141,7 +150,6 @@ class CodingAgent:
             api_key=Config.OPENAI_API_KEY,
             temperature=0.2,
         )
-        self.llm_with_tools = self.llm.bind_tools(ALL_TOOLS)
 
         # 摘要 LLM (用同一模型，无工具)
         self._summary_llm = ChatOpenAI(
@@ -151,8 +159,22 @@ class CodingAgent:
             temperature=0.0,
         )
 
-        # 可执行工具 (不含 ask_user，它需要特殊处理)
-        self._executable_tool_node = ToolNode(EXECUTABLE_TOOLS)
+        # 动态工具组合: 内置 + Skills + MCP (MCP 连接失败不影响启动)
+        self.mcp_status: dict[str, str] = {}
+        try:
+            self.mcp_status = mcp_manager.connect()
+        except Exception as exc:
+            print(f"[VCA] MCP 连接失败: {type(exc).__name__}: {exc}")
+
+        self._mcp_tools = mcp_manager.tools
+        self._all_tools = ALL_TOOLS + list(self._mcp_tools)
+        self._executable_tools = EXECUTABLE_TOOLS + list(self._mcp_tools)
+
+        # 绑定工具到 LLM
+        self.llm_with_tools = self.llm.bind_tools(self._all_tools)
+
+        # 可执行工具节点 (不含 ask_user，它需要特殊处理)
+        self._executable_tool_node = ToolNode(self._executable_tools)
 
         # 构建工作流图
         self.graph = self._build_graph()
