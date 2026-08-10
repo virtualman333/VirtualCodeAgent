@@ -385,7 +385,7 @@ def switch_workspace(command: str, current_ws: str) -> str | None:
 # ============================================================
 
 # 深度思考折叠时的占位长度
-_THINKING_COLLAPSED_MAX = 120
+_THINKING_COLLAPSED_MAX = 300
 
 
 def _truncate_thinking(text: str) -> str:
@@ -396,6 +396,32 @@ def _truncate_thinking(text: str) -> str:
     if len(compact) > _THINKING_COLLAPSED_MAX:
         compact = compact[:_THINKING_COLLAPSED_MAX] + "..."
     return compact
+
+
+# 工具结果: 完整显示阈值 (字符)
+_TOOL_FULL_THRESHOLD = 5000
+# 超长时保留的头部/尾部长度
+_TOOL_HEAD_KEEP = 3000
+_TOOL_TAIL_KEEP = 1500
+
+
+def _smart_truncate(content: str) -> str:
+    """
+    智能截断超长工具输出: 保留头部 + 尾部，中间省略。
+
+    大多数工具输出 (命令执行、文件列表) 头部是信息、尾部是结果/错误。
+    """
+    if len(content) <= _TOOL_FULL_THRESHOLD:
+        return content
+
+    head = content[:_TOOL_HEAD_KEEP]
+    tail = content[-_TOOL_TAIL_KEEP:]
+    omitted = len(content) - _TOOL_HEAD_KEEP - _TOOL_TAIL_KEEP
+    return (
+        f"{head}\n"
+        f"... [中间 {omitted:,} 字符已省略，输入 /verbose 查看完整] ...\n"
+        f"{tail}"
+    )
 
 
 def _format_tool_args(args: dict) -> str:
@@ -491,14 +517,8 @@ def run_agent(
                         for msg in node_output.get("messages", []):
                             if isinstance(msg, AIMessage) and msg.tool_calls:
                                 round_num += 1
-                                # 轮次标题
-                                if round_num > 1:
-                                    console.print()
-                                console.print(
-                                    f"[bold blue]── 第 {round_num} 轮 ──[/bold blue]"
-                                )
                                 break
-                        _render_agent_step(node_output, verbose, round_num)
+                        _render_agent_step(node_output, verbose)
 
                         # 显示本次 LLM 调用的 token 明细 + 耗时
                         usage = node_output.get("llm_usage") or {}
@@ -515,7 +535,7 @@ def run_agent(
                             if isinstance(msg, ToolMessage):
                                 if msg.content != "[AWAITING_USER_INPUT]":
                                     total_tools += 1
-                        _render_tools_step(node_output, verbose)
+                        _render_tools_step(node_output)
 
                         # 工具耗时
                         tool_usage = node_output.get("tool_usage") or {}
@@ -599,7 +619,7 @@ def run_agent(
 # 子渲染函数 (独立出来便于复用)
 # ============================================================
 
-def _render_agent_step(node_output: dict, verbose: bool, round_num: int) -> None:
+def _render_agent_step(node_output: dict, verbose: bool) -> None:
     """渲染 agent 节点的 LLM 推理输出"""
     messages = node_output.get("messages", [])
     for msg in messages:
@@ -647,7 +667,7 @@ def _render_agent_step(node_output: dict, verbose: bool, round_num: int) -> None
                 )
 
 
-def _render_tools_step(node_output: dict, verbose: bool) -> None:
+def _render_tools_step(node_output: dict) -> None:
     """渲染 tools 节点的执行结果"""
     messages = node_output.get("messages", [])
     for msg in messages:
@@ -670,18 +690,10 @@ def _render_tools_step(node_output: dict, verbose: bool) -> None:
         else:
             status_icon, status_color = "✓", "green"
 
-        result_preview = content
-        if not verbose and len(result_preview) > 600:
-            result_preview = (
-                result_preview[:600]
-                + f"\n... (共 {len(content)} 字符, 输入 /verbose 查看完整)"
-            )
-
-        # verbose 用 Markdown 渲染，精简模式用 Text 纯文本 (避免方括号被解析为 Rich 标签)
-        body: Panel | Text = Text(result_preview)
+        # 智能截断: <5K 完整显示, 超长保留头尾 (避免方括号被解析为 Rich 标签, 用 Text)
         console.print(
             Panel(
-                body,
+                Text(_smart_truncate(content)),
                 title=f"[bold {status_color}]{status_icon} {msg.name}[/bold {status_color}]",
                 border_style=status_color,
                 padding=(1, 2),

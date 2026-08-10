@@ -12,6 +12,8 @@
 - **深度思考可视化** - 可折叠/展开 LLM 推理过程，支持精简与详细两种展示模式
 - **多 Agent 编排 (SubAgent)** - 通过 `create_agent` 创建独立子代理处理子任务，支持后台异步与并行执行，子代理拥有独立对话历史、工具池和隔离环境
 - **文件系统信箱** - 后台子代理结果通过文件系统消息目录传递，贯彻 "文件系统即上下文" 设计思想
+- **MCP 集成** - 通过 `mcp.json` 配置接入任意 MCP (Model Context Protocol) Server，自动发现并加载外部工具（stdio / http / sse / websocket 多种传输方式）
+- **专业技能 (Skills)** - 可插拔的专业领域技能系统，通过 `list_skills` / `load_skill` 按需加载 SKILL.md 中的领域知识与工作流，支持用户级与项目级技能目录
 - **美观的终端 UI** - 基于 Rich 库，提供 Panel、Table、Markdown 渲染等
 
 ## 项目结构
@@ -38,6 +40,12 @@
         │   ├── mailbox.py          # 文件系统信箱（Agent 间通信）
         │   ├── manager.py          # 子代理生命周期管理（同步/后台/并行）
         │   └── tools.py            # AgentTool 工具集（create_agent 等）
+        ├── mcp/                    # MCP 集成
+        │   ├── __init__.py
+        │   └── manager.py          # MCP Server 连接与动态工具收集
+        ├── skills/                 # 专业技能（可插拔）
+        │   ├── __init__.py
+        │   └── manager.py          # Skill 发现、解析与加载
         └── tools/
             ├── __init__.py
             ├── read_tool.py        # 文件读取工具
@@ -228,6 +236,75 @@ User Input → agent (LLM 推理) → tools (工具执行) → respond (生成�
 - **Agent 包 Skill**：把数千 tokens 的长 Skill prompt 交给隔离子代理执行（Fork），
   仅返回精简结果，不污染主线对话
 
+## MCP 集成
+
+通过 [Model Context Protocol](https://modelcontextprotocol.io) 接入外部工具与服务。
+在项目根目录（或用户目录 `~/.vca/`）放置 `mcp.json` 即可声明要连接的 MCP Server，
+启动时 `mcp/manager.py` 会自动读取配置、建立连接并收集所有可用工具，注入到 Agent 的工具集中。
+
+### 配置文件格式
+
+```json
+{
+  "servers": {
+    "fetch": {
+      "transport": "stdio",
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-fetch"]
+    },
+    "http_server": {
+      "transport": "http",
+      "url": "http://localhost:8000/mcp"
+    }
+  }
+}
+```
+
+支持的传输方式：`stdio` / `http` / `sse` / `websocket`。
+每个 MCP 工具在调用时按需创建/销毁 session，无需维护长连接。
+
+### 使用
+
+- 启动后 Agent 会自动获得 MCP Server 提供的工具，无需额外命令
+- 用 `/config` 命令可查看当前已加载的 MCP 工具
+- 新增/修改 `mcp.json` 后重启程序即可生效
+
+## 专业技能 (Skills)
+
+Skills 是可插拔的专业领域技能包，每个 Skill 是一个包含 `SKILL.md` 的目录，
+其中写明该领域的知识、工作流程与注意事项。Agent 通过 `list_skills` 发现可用技能，
+用 `load_skill` 将技能内容加载到上下文后，即可按专业流程完成任务。
+
+### 技能目录
+
+Skill 从以下位置自动发现（按优先级合并，同名后者覆盖前者）：
+
+- **用户级**：`~/.vca/skills/<skill_name>/`
+- **项目级**：`<工作空间>/.vca/skills/<skill_name>/` 与 `<工作空间>/skills/<skill_name>/`
+
+### SKILL.md 结构
+
+```markdown
+---
+name: web-scraping
+description: 网页抓取与解析的专业技能
+---
+
+# Web Scraping
+
+## 工作流程
+1. 分析目标页面结构 ...
+2. 选择合适的解析方式 ...
+## 注意事项
+- 遵守 robots.txt ...
+```
+
+### 使用
+
+- `list_skills()` - 列出所有可用技能（名称 + 描述）
+- `load_skill(skill_name)` - 加载指定技能到上下文，获得其完整工作流与注意事项
+- 需要专业领域知识（如特定框架、协议、工具链）时，先 `list_skills` 再 `load_skill`
+
 ## 依赖
 
 | 包 | 用途 |
@@ -235,11 +312,14 @@ User Input → agent (LLM 推理) → tools (工具执行) → respond (生成�
 | langgraph | 图状态机编排 |
 | langchain-core | 消息与工具集成 |
 | langchain-openai | OpenAI 兼容 LLM |
+| langchain-mcp-adapters | MCP 工具转换为 LangChain 工具 |
+| mcp | MCP (Model Context Protocol) 客户端 |
 | python-dotenv | 环境变量加载 |
 | rich | 终端 UI 渲染 |
 | colorama | 跨平台终端颜色 |
 | Pillow | 图片处理 |
 | PyPDF2 | PDF 读取 |
+| PyYAML | Skill 元数据解析 |
 
 ## 开发
 
