@@ -6,7 +6,6 @@ import json
 import os
 import time
 from datetime import datetime, timezone, timedelta
-from pathlib import Path
 
 from langchain_core.messages import (
     BaseMessage,
@@ -16,10 +15,10 @@ from langchain_core.messages import (
     ToolMessage,
 )
 
-# ---- 路径常量 ----
-_BASE_DIR = Path.home() / ".vca"
-_SESSIONS_DIR = _BASE_DIR / "sessions"
-_INDEX_FILE = _BASE_DIR / "session_index.json"
+from .config import VCA_DIR, SESSIONS_DIR as _SESSIONS_DIR
+
+# ---- 路径常量 (统一使用 config.VCA_DIR 下的数据目录) ----
+_INDEX_FILE = VCA_DIR / "session_index.json"
 
 # ---- 时区 ----
 _TZ = timezone(timedelta(hours=8))  # UTC+8

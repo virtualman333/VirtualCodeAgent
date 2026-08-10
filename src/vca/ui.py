@@ -145,8 +145,38 @@ def show_workspace_info(workspace_dir: str, verbose: bool = False) -> None:
 
 def show_config_info(workspace_dir: str) -> None:
     """显示配置信息"""
-    console.print("[bold]当前配置:[/bold]")
-    Config.display(workspace_dir)
+    from .config import CONFIG_FILE
+
+    table = Table(title="当前配置", box=box.ROUNDED)
+    table.add_column("配置项", style="cyan")
+    table.add_column("值", style="white")
+    table.add_column("说明", style="dim")
+
+    rows = [
+        ("OPENAI_API_KEY", _mask_key(Config.OPENAI_API_KEY), "API 密钥 (首次使用必须填写)"),
+        ("OPENAI_BASE_URL", Config.OPENAI_BASE_URL, "OpenAI 兼容接口地址"),
+        ("OPENAI_MODEL", Config.OPENAI_MODEL, "模型名称"),
+        ("WORKSPACE_DIR", os.path.abspath(Config.WORKSPACE_DIR), "默认工作空间"),
+        ("MAX_TOOL_ITERATIONS", str(Config.MAX_TOOL_ITERATIONS), "工具最大迭代次数"),
+        ("MAX_CONTEXT_TOKENS", str(Config.MAX_CONTEXT_TOKENS), "上下文裁剪阈值"),
+    ]
+    for name, value, desc in rows:
+        table.add_row(name, value, desc)
+
+    console.print(table)
+    console.print(f"[dim]配置文件: {CONFIG_FILE}[/dim]")
+    console.print(
+        "[dim]修改方法: 编辑配置文件后重启，或使用 /config set <KEY> <VALUE>[/dim]"
+    )
+
+
+def _mask_key(key: str) -> str:
+    """掩码显示 API Key"""
+    if not key:
+        return "[red](未设置)[/red]"
+    if len(key) <= 8:
+        return "*" * len(key)
+    return key[:4] + "****" + key[-4:]
 
 
 # ============================================================

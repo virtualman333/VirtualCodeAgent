@@ -19,13 +19,10 @@ env/
 *.swp
 *.swo
 
-# Environment
-.env
-.env.local
-
 # OS
 .DS_Store
 Thumbs.db
 
-# Agent workspace (runtime)
+# Agent runtime (配置已迁移到 ~/.vca/)
 workspace/
+.vca/

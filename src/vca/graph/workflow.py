@@ -179,10 +179,8 @@ def _messages_to_text(messages: list[BaseMessage]) -> str:
 class CodingAgent:
     """基于 LangGraph ReAct 模式的编码 Agent"""
 
-    # 上下文上限 (token), 可通过 MAX_CONTEXT_TOKENS 环境变量覆盖
-    _MAX_CONTEXT_TOKENS: int = int(
-        os.getenv("MAX_CONTEXT_TOKENS", str(100 * 1024))
-    )
+    # 上下文上限 (token), 可在 ~/.vca/config.json 中配置 MAX_CONTEXT_TOKENS
+    _MAX_CONTEXT_TOKENS: int = Config.MAX_CONTEXT_TOKENS
 
     def __init__(
         self,

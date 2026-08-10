@@ -46,9 +46,9 @@ _registry = SkillRegistry()
 
 def _get_skill_dirs() -> list[str]:
     """获取所有 skill 搜索目录 (用户级 + 项目级)"""
-    dirs = []
-    user_dir = Path.home() / ".vca" / "skills"
-    dirs.append(str(user_dir))
+    from ..config import SKILLS_DIR
+
+    dirs = [str(SKILLS_DIR)]
     # 项目级: 当前工作目录下的 .vca/skills 和 skills
     cwd = Path.cwd()
     dirs.append(str(cwd / ".vca" / "skills"))

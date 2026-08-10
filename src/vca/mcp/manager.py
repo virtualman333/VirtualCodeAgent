@@ -39,6 +39,8 @@ from langchain_mcp_adapters.tools import (
 )
 from mcp.types import Tool as MCPTool
 
+from ..config import MCP_CONFIG_FILE
+
 
 def _make_sync_compatible(tool: StructuredTool) -> StructuredTool:
     """
@@ -88,7 +90,7 @@ class MCPManager:
         servers: dict[str, dict[str, Any]] = {}
 
         candidates = [
-            Path.home() / ".vca" / "mcp.json",
+            MCP_CONFIG_FILE,
             Path.cwd() / ".vca" / "mcp.json",
         ]
         for path in candidates:

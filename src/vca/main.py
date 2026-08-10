@@ -119,6 +119,31 @@ def _refresh_system_prompt(state, workspace_dir: str) -> None:
 # 命令分发
 # ============================================================
 
+_EDITABLE_KEYS = {
+    "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL",
+    "WORKSPACE_DIR", "MAX_TOOL_ITERATIONS", "MAX_CONTEXT_TOKENS",
+}
+
+
+def _set_config_value(key: str, value: str) -> None:
+    """通过 /config set 修改配置"""
+    if key not in _EDITABLE_KEYS:
+        console.print(
+            f"[red]无效配置项: {key}[/red]\n"
+            f"[dim]可用: {', '.join(sorted(_EDITABLE_KEYS))}[/dim]"
+        )
+        return
+
+    try:
+        if key in ("MAX_TOOL_ITERATIONS", "MAX_CONTEXT_TOKENS"):
+            value = str(int(value))  # 数值校验
+        Config.set(key, value)
+        console.print(f"[green]✓ 已更新 {key}: {value}[/green]")
+        console.print("[dim]部分配置需重启后完全生效[/dim]")
+    except ValueError:
+        console.print(f"[red]{key} 需要整数值[/red]")
+
+
 def _handle_command(
     cmd: str,
     user_input: str,
@@ -174,7 +199,13 @@ def _handle_command(
             _refresh_system_prompt(state, new_ws)
 
     elif cmd == "/config":
-        show_config_info(workspace_dir)
+        # 支持 /config set <KEY> <VALUE> 修改配置
+        parts = user_input.split()
+        if len(parts) >= 4 and parts[1] == "set":
+            key, value = parts[2], " ".join(parts[3:])
+            _set_config_value(key, value)
+        else:
+            show_config_info(workspace_dir)
 
     elif cmd == "/skills":
         _show_skills()
@@ -231,7 +262,8 @@ def main() -> None:
 
     # 1. 验证配置
     if not Config.validate():
-        console.print("[red]请复制 .env.example 为 .env 并填入你的 API Key[/red]")
+        from .config import CONFIG_FILE
+        console.print(f"[red]请在配置文件中填入你的 API Key: {CONFIG_FILE}[/red]")
         sys.exit(1)
 
     # 2. 选择工作空间
