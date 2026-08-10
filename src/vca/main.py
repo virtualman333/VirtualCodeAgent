@@ -408,94 +408,99 @@ def run_agent(
     verbose: bool = False,
 ) -> None:
     """
-    运行 Agent 并显示带进度时间线的结果。
-    支持 LLM 通过 ask_user 工具向用户提问 —— 检测到后弹出交互式 UI。
+    运行 Agent 并流式显示每步结果。
 
     显示逻辑:
-    - 默认 (verbose=False): 深度思考折叠为一行 [展开查看]
+    - 每步 LLM 推理 / 工具调用 / 最终回答都实时输出
+    - 默认 (verbose=False): 深度思考折叠为一行
     - 详细 (verbose=True):  深度思考完整展开
-    - 工具调用始终显示，结果按状态截断
+    - 支持 ask_user 暂停/恢复
     """
     user_msg = HumanMessage(content=user_input)
     state["messages"].append(user_msg)
 
     # --- 外层循环: 处理 ask_user 暂停/恢复 ---
     while True:
+        round_num = 0       # 工具循环轮次
+        total_tools = 0     # 工具调用总次数
+        has_respond = False # 本轮是否已输出最终回答
+
         try:
-            with console.status("[bold green]Agent 推理中...[/bold green]", spinner="dots"):
-                steps = list(agent_instance.stream(state))
+            # 流式迭代: 不缓存，每来一个 step 即刻渲染
+            for step in agent_instance.stream(state):
+                for node_name, node_output in step.items():
+
+                    # --- agent 节点 (LLM 推理) ---
+                    if node_name == "agent":
+                        for msg in node_output.get("messages", []):
+                            if isinstance(msg, AIMessage) and msg.tool_calls:
+                                round_num += 1
+                                # 轮次标题
+                                if round_num > 1:
+                                    console.print()
+                                console.print(
+                                    f"[bold blue]── 第 {round_num} 轮 ──[/bold blue]"
+                                )
+                                break
+                        _render_agent_step(node_output, verbose, round_num)
+
+                    # --- tools 节点 (执行结果) ---
+                    elif node_name == "tools":
+                        for msg in node_output.get("messages", []):
+                            if isinstance(msg, ToolMessage):
+                                if msg.content != "[AWAITING_USER_INPUT]":
+                                    total_tools += 1
+                        _render_tools_step(node_output, verbose)
+
+                    # --- ask_user 节点: 实时检测挂起 ---
+                    elif node_name == "ask_user":
+                        pass  # render 在外层 pending_question 检查处理
+
+                    # --- respond 节点: 最终回答 ---
+                    elif node_name == "respond":
+                        final = node_output.get("final_response", "")
+                        pending = state.get("pending_question")
+                        if final and not pending:
+                            console.print()
+                            console.print(
+                                Panel(
+                                    Markdown(final),
+                                    title="[bold green]✓ 最终回答[/bold green]",
+                                    border_style="green",
+                                    padding=(1, 3),
+                                )
+                            )
+                            has_respond = True
+
+                # 每步后检查 ask_user 挂起
+                if state.get("pending_question"):
+                    break
+
         except Exception as e:
             console.print(f"[red bold]Error:[/red bold] {e}")
             return
 
-        # ---------- 解析步骤 ----------
-        round_num = 0
-
-        for step in steps:
-            for node_name, node_output in step.items():
-
-                # --- agent 节点 (LLM 推理) ---
-                if node_name == "agent":
-                    _render_agent_step(node_output, verbose, round_num)
-                    # 有工具调用时更新 round_num
-                    for msg in node_output.get("messages", []):
-                        if isinstance(msg, AIMessage) and msg.tool_calls:
-                            round_num += 1
-                            console.print(
-                                f"[bold blue]── 第 {round_num} 轮 ──[/bold blue]"
-                            )
-                            break
-
-                # --- tools 节点 (工具执行结果) ---
-                elif node_name == "tools":
-                    _render_tools_step(node_output, verbose)
-
-                # --- ask_user 节点 (用户交互拦截) ---
-                # ask_user 节点产生占位 ToolMessage "[AWAITING_USER_INPUT]"
-                # 这里不渲染它，由外层的 pending_question 检查统一处理
-
-                # --- respond 节点 (最终回复) ---
-                elif node_name == "respond":
-                    final = node_output.get("final_response", "")
-                    # 如果有挂起问题，不显示最终回复（占位文本）
-                    if final and not state.get("pending_question"):
-                        console.print()
-                        response_panel = Panel(
-                            Markdown(final),
-                            title="[bold green]✓ 最终回答[/bold green]",
-                            border_style="green",
-                            padding=(1, 3),
-                        )
-                        console.print(response_panel)
-
-        # --- 步骤完成后的统计 ---
-        total_tools = sum(
-            1
-            for step in steps
-            for node_id, output in step.items()
-            if node_id == "tools"
-            for _msg in output.get("messages", [])
-        )
+        # --- 汇总 ---
         if round_num > 0:
             console.print(
                 f"[dim]共 {round_num} 轮推理, {total_tools} 次工具调用[/dim]"
             )
-        console.print()
 
-        # --- 检查是否有挂起的问题 ---
+        # --- 检测 ask_user 挂起 ---
         pending = state.get("pending_question")
         if not pending:
-            break  # 无挂起问题，正常结束
-
-        # --- 显示问题并收集用户回答 ---
-        answer = _render_ask_user(pending)
-        if answer is None:
-            # 用户取消
-            state["pending_question"] = None
-            console.print("[dim]用户取消了提问[/dim]")
+            console.print()
             break
 
-        # --- 将回答注入状态，继续循环 ---
+        # 弹出交互式问题
+        answer = _render_ask_user(pending)
+        if answer is None:
+            state["pending_question"] = None
+            console.print("[dim]用户取消了提问[/dim]")
+            console.print()
+            break
+
+        # 注入回答，继续外层循环
         state["messages"].append(
             ToolMessage(
                 content=answer,
