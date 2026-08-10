@@ -54,6 +54,12 @@ class AgentState(TypedDict):
     # 当对话超长被裁剪时，LLM 生成的语义摘要（累积）
     summary_history: str
 
+    # --- 用量统计 ---
+    # 最近一次 LLM 调用的 token 消耗 (input/output/total) 与耗时
+    llm_usage: dict[str, Any]
+    # 最近一次工具执行的耗时明细
+    tool_usage: dict[str, Any]
+
 
 def create_initial_state(workspace_dir: str) -> AgentState:
     """创建初始状态"""
@@ -67,4 +73,6 @@ def create_initial_state(workspace_dir: str) -> AgentState:
         workspace_dir=workspace_dir,
         pending_question=None,
         summary_history="",
+        llm_usage={},
+        tool_usage={},
     )

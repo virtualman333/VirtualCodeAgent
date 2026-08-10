@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import platform
 import sys
+import time
 from typing import Literal
 
 from langgraph.graph import StateGraph, END
@@ -101,6 +102,36 @@ def _message_tokens(msg: BaseMessage) -> int:
     elif isinstance(msg, AIMessage) and msg.tool_calls:
         base += _estimate_tokens(str(msg.tool_calls)) + 50
     return base
+
+
+def _extract_token_usage(response) -> dict:
+    """
+    从 LLM 响应中提取 token 使用量，兼容不同格式:
+    - response_metadata.token_usage (OpenAI 格式)
+    - usage_metadata (LangChain 新格式)
+    """
+    usage: dict = {}
+    # 新版 langchain: usage_metadata
+    um = getattr(response, "usage_metadata", None)
+    if um:
+        usage = {
+            "input_tokens": um.get("input_tokens", 0),
+            "output_tokens": um.get("output_tokens", 0),
+            "total_tokens": um.get("total_tokens", 0),
+        }
+        if usage.get("total_tokens") or usage.get("input_tokens"):
+            return usage
+
+    # 旧版兼容: response_metadata.token_usage
+    rm = getattr(response, "response_metadata", {}) or {}
+    tu = rm.get("token_usage") or {}
+    if tu:
+        return {
+            "input_tokens": tu.get("prompt_tokens", 0),
+            "output_tokens": tu.get("completion_tokens", 0),
+            "total_tokens": tu.get("total_tokens", 0),
+        }
+    return usage
 
 
 def _messages_to_text(messages: list[BaseMessage]) -> str:
@@ -371,8 +402,15 @@ class CodingAgent:
             keep_turns=8,
         )
 
+        # 调用 LLM 并统计 token 与耗时
+        start_time = time.perf_counter()
         response = self.llm_with_tools.invoke(trimmed)
-        return {"messages": [response]}
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+        usage = _extract_token_usage(response)
+        usage["duration_ms"] = elapsed_ms
+
+        return {"messages": [response], "llm_usage": usage}
 
     # --------------------------------------------------------
     # 条件路由 (保持不变)
@@ -404,7 +442,17 @@ class CodingAgent:
         if ws:
             self.workspace_dir = ws
             workspace_ctx.set_workspace(ws)
+
+        # 记录工具执行耗时
+        start_time = time.perf_counter()
         result = self._executable_tool_node.invoke(state)
+        elapsed_ms = (time.perf_counter() - start_time) * 1000
+
+        tool_count = len(result.get("messages", []))
+        result["tool_usage"] = {
+            "count": tool_count,
+            "duration_ms": elapsed_ms,
+        }
         return result
 
     def _ask_user_node(self, state: AgentState) -> dict:

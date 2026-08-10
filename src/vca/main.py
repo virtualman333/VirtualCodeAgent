@@ -64,19 +64,20 @@ def parse_args() -> argparse.Namespace:
 # 工作空间选择
 # ============================================================
 
-def select_workspace(cli_path: str | None = None) -> str:
+def select_workspace(cli_path: str | None = None) -> tuple[str, bool]:
     """
     交互式选择工作空间。
-    
-    优先级:
-    1. 命令行参数指定的路径
-    2. 用户交互选择
+
+    Returns:
+        (工作空间绝对路径, 是否用户显式选择)
+        explicit=True  用户明确指定了路径 (CLI参数/手动输入/历史/当前目录)
+        explicit=False 使用了默认工作空间
     """
-    # 命令行指定了路径 → 直接使用
+    # 命令行指定了路径 → 直接使用 (显式)
     if cli_path:
         resolved = Config.resolve_workspace(cli_path)
         Config.add_workspace_to_history(resolved)
-        return resolved
+        return resolved, True
 
     # 交互式选择
     console.clear()
@@ -152,7 +153,8 @@ def select_workspace(cli_path: str | None = None) -> str:
             Config.add_workspace_to_history(resolved)
             console.print(f"\n[green]✓ 工作空间: {resolved}[/green]")
             console.print()
-            return resolved
+            # 选"默认工作空间"视为非显式 (可被上次会话工作空间覆盖)
+            return resolved, choice == key_default
 
         if choice == key_manual:
             while True:
@@ -173,7 +175,7 @@ def select_workspace(cli_path: str | None = None) -> str:
                     Config.add_workspace_to_history(expanded)
                     console.print(f"\n[green]✓ 工作空间: {expanded}[/green]")
                     console.print()
-                    return expanded
+                    return expanded, True
                 else:
                     if Confirm.ask(
                         f"目录 [yellow]{expanded}[/yellow] 不存在，是否创建？",
@@ -183,7 +185,7 @@ def select_workspace(cli_path: str | None = None) -> str:
                         Config.add_workspace_to_history(expanded)
                         console.print(f"\n[green]✓ 已创建并选择: {expanded}[/green]")
                         console.print()
-                        return expanded
+                        return expanded, True
 
         console.print(f"[red]无效选项: {choice}[/red]")
 
@@ -406,6 +408,49 @@ def _format_tool_args(args: dict) -> str:
     return ", ".join(parts)
 
 
+def _fmt_num(n) -> str:
+    """格式化数字: 千分位"""
+    try:
+        return f"{int(n):,}"
+    except (TypeError, ValueError):
+        return "0"
+
+
+def _fmt_duration(ms: float) -> str:
+    """格式化耗时: <1000ms 显示 ms, 否则显示 s"""
+    try:
+        ms = float(ms)
+    except (TypeError, ValueError):
+        return "-"
+    if ms < 1000:
+        return f"{ms:.0f}ms"
+    return f"{ms / 1000:.1f}s"
+
+
+def _render_usage_line(usage: dict) -> None:
+    """渲染单次 LLM 调用的 token 明细 + 耗时"""
+    if not usage:
+        return
+    tokens = usage.get("total_tokens", 0)
+    if not tokens:
+        return  # 无 token 数据 (如未启用 usage 统计)
+
+    inp = _fmt_num(usage.get("input_tokens", 0))
+    out = _fmt_num(usage.get("output_tokens", 0))
+    total = _fmt_num(tokens)
+    dur = _fmt_duration(usage.get("duration_ms", 0))
+
+    console.print(
+        Text.assemble(
+            "  ", ("⚡", "cyan"),
+            " Token: ",
+            (f"输入 {inp} | 输出 {out} | 总计 {total}", "cyan"),
+            " | ",
+            (f"耗时 {dur}", "magenta"),
+        )
+    )
+
+
 def run_agent(
     agent_instance,
     state: AgentState,
@@ -429,6 +474,12 @@ def run_agent(
         round_num = 0       # 工具循环轮次
         total_tools = 0     # 工具调用总次数
         has_respond = False # 本轮是否已输出最终回答
+        # Token 汇总
+        sum_input = 0
+        sum_output = 0
+        sum_total = 0
+        sum_llm_ms = 0.0
+        sum_tool_ms = 0.0
 
         try:
             # 流式迭代: 不缓存，每来一个 step 即刻渲染
@@ -449,6 +500,15 @@ def run_agent(
                                 break
                         _render_agent_step(node_output, verbose, round_num)
 
+                        # 显示本次 LLM 调用的 token 明细 + 耗时
+                        usage = node_output.get("llm_usage") or {}
+                        if usage:
+                            sum_input += usage.get("input_tokens", 0) or 0
+                            sum_output += usage.get("output_tokens", 0) or 0
+                            sum_total += usage.get("total_tokens", 0) or 0
+                            sum_llm_ms += usage.get("duration_ms", 0) or 0
+                            _render_usage_line(usage)
+
                     # --- tools 节点 (执行结果) ---
                     elif node_name == "tools":
                         for msg in node_output.get("messages", []):
@@ -456,6 +516,11 @@ def run_agent(
                                 if msg.content != "[AWAITING_USER_INPUT]":
                                     total_tools += 1
                         _render_tools_step(node_output, verbose)
+
+                        # 工具耗时
+                        tool_usage = node_output.get("tool_usage") or {}
+                        if tool_usage:
+                            sum_tool_ms += tool_usage.get("duration_ms", 0) or 0
 
                     # --- ask_user 节点: 实时检测挂起 ---
                     elif node_name == "ask_user":
@@ -486,8 +551,20 @@ def run_agent(
             console.print(Text(str(e)))
             return
 
-        # --- 汇总 ---
-        if round_num > 0:
+        # --- 汇总 (Token 明细 + 耗时) ---
+        if sum_total > 0:
+            console.print()
+            total_dur = _fmt_duration(sum_llm_ms + sum_tool_ms)
+            parts = [
+                ("📊 本轮用量: ", "cyan"),
+                (f"Token {_fmt_num(sum_input)}↑ / {_fmt_num(sum_output)}↓"
+                 f" / 共 {_fmt_num(sum_total)}", "cyan"),
+            ]
+            if total_tools:
+                parts.append((f" | 工具 {total_tools} 次", "yellow"))
+            parts.append((f" | 总耗时 {total_dur}", "magenta"))
+            console.print(Text.assemble(*parts))
+        elif round_num > 0:
             console.print(
                 f"[dim]共 {round_num} 轮推理, {total_tools} 次工具调用[/dim]"
             )
@@ -731,7 +808,7 @@ def main() -> None:
 
     # 2. 选择工作空间
     cli_path = args.workspace or args.workspace_flag
-    workspace_dir = select_workspace(cli_path)
+    workspace_dir, ws_explicit = select_workspace(cli_path)
 
     # 3. 创建 Agent
     console.print("[dim]正在初始化 Agent...[/dim]")
@@ -753,11 +830,10 @@ def main() -> None:
         last_title = last_session.get("title", "未命名")
 
         state["messages"] = last_session.get("messages", [])
-        if last_ws and os.path.isdir(last_ws):
-            # 沿用上次的工作空间
-            if os.path.abspath(last_ws) != os.path.abspath(workspace_dir):
-                workspace_dir = last_ws
-            state["workspace_dir"] = workspace_dir
+        # 仅当用户未显式选择工作空间时，才沿用上次会话的工作空间
+        if not ws_explicit and last_ws and os.path.isdir(last_ws):
+            workspace_dir = last_ws
+        state["workspace_dir"] = workspace_dir
 
         sessions = storage.list_sessions(1)
         if sessions:
@@ -765,7 +841,7 @@ def main() -> None:
 
         console.print(
             f"[green]↺ 已自动恢复上次对话[/green] "
-            f"[dim]「{last_title}」({msg_count} 条消息)[/dim]"
+            f"[dim]「{last_title}」({msg_count} 条消息) | 工作空间: {workspace_dir}[/dim]"
         )
 
     # 6. 显示界面
