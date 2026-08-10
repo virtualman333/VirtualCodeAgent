@@ -96,6 +96,54 @@ MAX_TOOL_ITERATIONS=10
 
 支持任何兼容 OpenAI API 的服务（如 Azure OpenAI、本地 LLM 等），只需修改 `OPENAI_BASE_URL` 和 `OPENAI_MODEL`。
 
+#### 首次模型配置指引
+
+首次启动 Agent 时，程序会在用户目录下自动生成配置文件 `~/.vca/config.json`（Windows 通常为 `C:\Users\<用户名>\.vca\config.json`）。请按以下步骤完成模型配置：
+
+1. **启动程序触发配置生成**
+
+   ```bash
+   python run.py
+   ```
+
+   若检测到配置文件不存在，终端会输出类似提示：
+
+   ```
+   [INFO] 已生成默认配置文件 <用户目录>/.vca/config.json
+   [INFO] 请编辑该文件填入你的 OPENAI_API_KEY
+   ```
+
+2. **编辑配置文件填入密钥**
+
+   打开 `~/.vca/config.json`，将 `OPENAI_API_KEY` 的空字符串替换为你的真实 API Key：
+
+   ```json
+   {
+     "OPENAI_API_KEY": "sk-xxxxxxxxxxxxxxxxxxxxxxxx",
+     "OPENAI_BASE_URL": "https://api.openai.com/v1",
+     "OPENAI_MODEL": "gpt-4o-mini",
+     "WORKSPACE_DIR": "~/.vca/workspace",
+     "MAX_TOOL_ITERATIONS": 10
+   }
+   ```
+
+3. **（可选）切换为其他兼容模型**
+
+   若使用第三方或本地兼容服务，修改 `OPENAI_BASE_URL` 与 `OPENAI_MODEL` 即可，例如：
+
+   ```json
+   {
+     "OPENAI_BASE_URL": "https://your-endpoint/v1",
+     "OPENAI_MODEL": "your-model-name"
+   }
+   ```
+
+4. **重新启动**
+
+   保存配置文件后，再次运行 `python run.py` 即可开始对话。若密钥或地址填写有误，Agent 会在调用模型时返回相应错误信息，请检查配置后重试。
+
+> 提示：配置文件为 JSON 格式，请确保 Key 使用双引号包裹且为合法 JSON；`WORKSPACE_DIR` 可指定默认工作空间目录，`MAX_TOOL_ITERATIONS` 控制单次任务最大工具调用轮数。
+
 ### 运行
 
 ```bash
