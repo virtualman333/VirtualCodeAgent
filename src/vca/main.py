@@ -241,12 +241,14 @@ def show_help(verbose: bool = False) -> None:
   [cyan]/workspace[/cyan]   - 显示工作空间详情
   [cyan]/cd[/cyan] <路径>    - 切换工作空间目录
   [cyan]/verbose[/cyan]     - 切换深度思考展开/折叠  {verbose_status}
+  [cyan]/new[/cyan]         - 开启新对话窗口（当前对话自动保存）
   [cyan]/history[/cyan]     - 查看对话历史记录
   [cyan]/load[/cyan]        - 恢复上一次对话
   [cyan]/load[/cyan] <编号>  - 恢复指定历史对话
   [cyan]/save[/cyan]        - 手动保存当前对话
   [cyan]/skills[/cyan]      - 查看可用的专业技能
   [cyan]/mcp[/cyan]         - 查看 MCP server 连接状态
+  [cyan]/agents[/cyan]      - 查看所有 SubAgent（子代理）状态
   [cyan]/config[/cyan]      - 显示当前配置
   [cyan]/exit[/cyan]        - 退出程序
 
@@ -741,29 +743,30 @@ def main() -> None:
 
     # 4. 创建初始状态
     state = create_initial_state(workspace_dir)
-
-    # 5. 询问是否恢复上次会话
     session_id: str | None = None
+
+    # 5. 自动恢复上次会话（无需确认）
     last_session = storage.get_last_session()
     if last_session and last_session.get("messages"):
         msg_count = len(last_session["messages"])
         last_ws = last_session.get("workspace_dir", "")
         last_title = last_session.get("title", "未命名")
 
-        console.print(f"[dim]发现上次会话: {last_title} ({msg_count} 条消息)[/dim]")
+        state["messages"] = last_session.get("messages", [])
         if last_ws and os.path.isdir(last_ws):
-            console.print(f"[dim]  原工作空间: {last_ws}[/dim]")
+            # 沿用上次的工作空间
+            if os.path.abspath(last_ws) != os.path.abspath(workspace_dir):
+                workspace_dir = last_ws
+            state["workspace_dir"] = workspace_dir
 
-        if Confirm.ask("是否恢复上次对话？", default=True):
-            state["messages"] = last_session.get("messages", [])
-            if last_ws:
-                # 如果工作空间相同，沿用
-                if os.path.abspath(last_ws) == os.path.abspath(workspace_dir):
-                    state["workspace_dir"] = workspace_dir
-            session_id = storage.list_sessions(1)[0]["id"] if storage.list_sessions(1) else None
-            console.print("[green]✓ 对话已恢复[/green]\n")
-        else:
-            console.print("[dim]已跳过恢复[/dim]\n")
+        sessions = storage.list_sessions(1)
+        if sessions:
+            session_id = sessions[0]["id"]
+
+        console.print(
+            f"[green]↺ 已自动恢复上次对话[/green] "
+            f"[dim]「{last_title}」({msg_count} 条消息)[/dim]"
+        )
 
     # 6. 显示界面
     console.clear()
@@ -772,11 +775,16 @@ def main() -> None:
     # 显示模式标志
     verbose = False
 
+    # 当前窗口序号 (基于历史会话数量)
+    window_no = len(storage.list_sessions()) + 1
+
     console.print(
         Panel(
-            f"工作空间: [cyan]{workspace_dir}[/cyan]\n\n"
+            f"工作空间: [cyan]{workspace_dir}[/cyan]\n"
+            f"当前窗口: [bold magenta]#{window_no}[/bold magenta]\n\n"
             "输入编程任务，Agent 将自动完成。\n"
-            "输入 [cyan]/help[/cyan] 查看可用命令，[cyan]/cd <路径>[/cyan] 切换项目。",
+            "输入 [cyan]/help[/cyan] 查看可用命令，[cyan]/cd <路径>[/cyan] 切换项目。\n"
+            "[cyan]/new[/cyan] 开启新对话窗口。",
             title="[bold]就绪[/bold]",
             border_style="green",
         )
@@ -785,9 +793,9 @@ def main() -> None:
 
     # 7. 主事件循环
     while True:
-        # 动态提示符: 显示工作空间简称
+        # 动态提示符: 显示工作空间简称 + 窗口序号
         ws_name = os.path.basename(workspace_dir) or workspace_dir
-        prompt = f"[bold cyan]{ws_name}[/bold cyan] > "
+        prompt = f"[bold cyan]{ws_name}[/bold cyan] [dim]#{window_no}[/dim] > "
 
         try:
             user_input = console.input(prompt).strip()
@@ -813,6 +821,18 @@ def main() -> None:
                 break
             elif cmd == "/help":
                 show_help(verbose=verbose)
+            elif cmd == "/new":
+                # 新对话窗口: 保存当前 → 开启新窗口
+                if session_id or state.get("messages", []):
+                    sid = storage.auto_save(state, session_id)
+                    console.print(f"[dim]当前对话已保存 ({sid})[/dim]")
+                state = create_initial_state(workspace_dir)
+                session_id = None
+                window_no = len(storage.list_sessions()) + 1
+                console.print(
+                    f"[green]✓ 已开启新对话窗口 #{window_no}[/green] "
+                    f"[dim](输入 /load 可切回历史窗口)[/dim]"
+                )
             elif cmd == "/clear":
                 state = create_initial_state(workspace_dir)
                 session_id = None
@@ -847,6 +867,8 @@ def main() -> None:
                 _show_skills()
             elif cmd == "/mcp":
                 _show_mcp()
+            elif cmd == "/agents":
+                _show_agents()
             elif cmd == "/history":
                 _show_history()
             elif cmd == "/save":
@@ -865,6 +887,8 @@ def main() -> None:
                     if sid:
                         session_id = sid
                         workspace_dir = state["workspace_dir"]
+                # 更新窗口序号
+                window_no = _find_window_no(session_id)
             else:
                 console.print(f"[red]未知命令: {user_input}[/red]")
             console.print()
@@ -910,9 +934,90 @@ def _show_mcp() -> None:
     console.print(Text(mcp_manager.status_text()))
 
 
+def _show_agents() -> None:
+    """显示所有 SubAgent 的状态"""
+    from .subagents import mailbox
+    from .subagents.manager import get_manager
+    from .subagents.types import STATUS_PENDING, STATUS_RUNNING, STATUS_COMPLETED, STATUS_FAILED
+
+    mgr = get_manager()
+    mem = mgr.list()
+    disk = mailbox.list_agents()
+
+    # 合并内存 + 磁盘信箱 (去重)
+    seen: set[str] = set()
+    merged = []
+    for a in mem + disk:
+        if a.id in seen:
+            continue
+        seen.add(a.id)
+        merged.append(a)
+
+    if not merged:
+        console.print("[dim]暂无 SubAgent[/dim]")
+        console.print(
+            "[dim]主 Agent 可使用 create_agent 工具创建子代理来处理子任务，"
+            "实现任务分派、并行执行与上下文隔离。[/dim]"
+        )
+        return
+
+    status_style = {
+        STATUS_PENDING: "yellow",
+        STATUS_RUNNING: "cyan",
+        STATUS_COMPLETED: "green",
+        STATUS_FAILED: "red",
+    }
+
+    table = Table(title=f"SubAgent 列表 ({len(merged)})", box=box.ROUNDED)
+    table.add_column("ID", style="cyan", width=18)
+    table.add_column("名称", style="white", width=16)
+    table.add_column("状态", justify="center", width=10)
+    table.add_column("模式", justify="center", width=10)
+    table.add_column("耗时", justify="right", width=8)
+    table.add_column("工作目录", style="dim", width=28)
+
+    for a in merged:
+        dur = f"{a.finished_at - a.created_at:.0f}s" if a.finished_at else "-"
+        ws = a.workspace_dir
+        if len(ws) > 28:
+            ws = "..." + ws[-25:]
+        table.add_row(
+            a.id,
+            a.name[:16],
+            f"[{status_style.get(a.status, 'white')}]{a.status}[/]",
+            a.mode,
+            dur,
+            ws,
+        )
+
+    console.print(table)
+
+    # 结果摘要
+    for a in merged:
+        if a.status == STATUS_FAILED and a.error:
+            console.print(f"[red]✗ {a.id} 失败: {a.error[:120]}[/red]")
+        elif a.is_finished and a.result:
+            brief = a.result.replace("\n", " ")[:100]
+            console.print(f"[dim]  {a.id} 结果: {brief}[/dim]")
+    console.print(
+        "[dim]主 Agent 可通过 get_agent_result 获取结果，delete_agent 清理记录。[/dim]"
+    )
+
+
 # ============================================================
 # 历史记录 UI 辅助
 # ============================================================
+
+def _find_window_no(session_id: str | None) -> int:
+    """根据 session_id 计算窗口序号（历史列表位置+1）"""
+    if not session_id:
+        return len(storage.list_sessions()) + 1
+    sessions = storage.list_sessions()
+    for i, s in enumerate(sessions):
+        if s.get("id") == session_id:
+            return i + 1
+    return len(sessions) + 1
+
 
 def _show_history() -> None:
     """显示历史会话列表"""

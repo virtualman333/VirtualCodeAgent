@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from langchain_core.tools import tool
 
+from ..workspace_ctx import resolve_path
+
 
 @tool
 def write_file(path: str, content: str) -> str:
@@ -50,7 +52,5 @@ def write_file(path: str, content: str) -> str:
 
 
 def _resolve_path(path: str) -> str:
-    """智能路径解析"""
-    if os.path.isabs(path):
-        return path
-    return os.path.abspath(path)
+    """智能路径解析 (基于当前线程的逻辑工作目录)"""
+    return resolve_path(path)

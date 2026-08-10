@@ -40,7 +40,8 @@ def _message_to_dict(msg: BaseMessage) -> dict:
         out["content"] = msg.content
     elif isinstance(msg, AIMessage):
         out["content"] = msg.content
-        if msg.tool_calls:
+        # 仅当有 tool_calls 时才写入，避免 null 导致反序列化校验失败
+        if getattr(msg, "tool_calls", None):
             out["tool_calls"] = list(msg.tool_calls)
     elif isinstance(msg, SystemMessage):
         out["content"] = msg.content
@@ -58,10 +59,11 @@ def _dict_to_message(data: dict) -> BaseMessage:
     if msg_type == "HumanMessage":
         return HumanMessage(content=content)
     elif msg_type == "AIMessage":
-        return AIMessage(
-            content=content,
-            tool_calls=data.get("tool_calls"),
-        )
+        tool_calls = data.get("tool_calls")
+        # tool_calls 为 None 时不要传参，否则新版 langchain 校验失败
+        if tool_calls:
+            return AIMessage(content=content, tool_calls=tool_calls)
+        return AIMessage(content=content)
     elif msg_type == "SystemMessage":
         return SystemMessage(content=content)
     elif msg_type == "ToolMessage":

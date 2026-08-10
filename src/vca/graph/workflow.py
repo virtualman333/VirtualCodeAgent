@@ -14,8 +14,9 @@ from langchain_core.messages import AIMessage, SystemMessage, BaseMessage, Human
 
 from ..state import AgentState
 from ..config import Config
-from ..tools import ALL_TOOLS, EXECUTABLE_TOOLS, SKILL_TOOLS
+from ..tools import ALL_TOOLS
 from ..mcp.manager import mcp_manager
+from .. import workspace_ctx
 
 # ============================================================
 # 系统提示词模板
@@ -142,7 +143,20 @@ class CodingAgent:
         os.getenv("MAX_CONTEXT_TOKENS", str(100 * 1024))
     )
 
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        include_tools: list | None = None,
+        mcp_tools: list | None = None,
+    ) -> None:
+        """
+        初始化 Agent。
+
+        Args:
+            include_tools: 指定工具池子集 (SubAgent 独立工具池)。
+                           None = 使用全部内置 + Skill + 多 Agent 工具。
+            mcp_tools: 外部提供的 MCP 工具 (SubAgent 复用主 Agent 的连接)。
+                       None = 主动连接 MCP。
+        """
         # 初始化 LLM (主模型，带工具绑定)
         self.llm = ChatOpenAI(
             model=Config.OPENAI_MODEL,
@@ -159,16 +173,34 @@ class CodingAgent:
             temperature=0.0,
         )
 
-        # 动态工具组合: 内置 + Skills + MCP (MCP 连接失败不影响启动)
-        self.mcp_status: dict[str, str] = {}
-        try:
-            self.mcp_status = mcp_manager.connect()
-        except Exception as exc:
-            print(f"[VCA] MCP 连接失败: {type(exc).__name__}: {exc}")
+        # 当前工作空间 (随 /cd 与各轮次更新, 供 SubAgent 继承)
+        self.workspace_dir: str = ""
 
-        self._mcp_tools = mcp_manager.tools
-        self._all_tools = ALL_TOOLS + list(self._mcp_tools)
-        self._executable_tools = EXECUTABLE_TOOLS + list(self._mcp_tools)
+        # 动态工具组合: 内置 + Skills + 多Agent + MCP (MCP 连接失败不影响启动)
+        self.mcp_status: dict[str, str] = {}
+        if mcp_tools is None:
+            # 主 Agent: 主动连接 MCP
+            try:
+                self.mcp_status = mcp_manager.connect()
+            except Exception as exc:
+                print(f"[VCA] MCP 连接失败: {type(exc).__name__}: {exc}")
+            self._mcp_tools = list(mcp_manager.tools)
+            # 注册到 SubAgent 管理器 (供子代理复用 MCP 工具)
+            try:
+                from ..subagents.manager import get_manager
+                get_manager().attach(self)
+            except Exception:
+                pass
+        else:
+            # SubAgent: 复用主 Agent 的 MCP 工具
+            self._mcp_tools = list(mcp_tools)
+
+        if include_tools is not None:
+            # SubAgent 独立工具池: 指定工具 + 复用 MCP 工具
+            self._all_tools = list(include_tools) + list(self._mcp_tools)
+        else:
+            self._all_tools = ALL_TOOLS + list(self._mcp_tools)
+        self._executable_tools = [t for t in self._all_tools if t.name != "ask_user"]
 
         # 绑定工具到 LLM
         self.llm_with_tools = self.llm.bind_tools(self._all_tools)
@@ -324,6 +356,10 @@ class CodingAgent:
         messages = state["messages"]
         workspace = state["workspace_dir"]
 
+        # 记录当前工作空间 + 同步当前线程的逻辑工作目录 (多 Agent 环境隔离的关键)
+        self.workspace_dir = workspace
+        workspace_ctx.set_workspace(workspace)
+
         if not messages or not isinstance(messages[0], SystemMessage):
             system_msg = SystemMessage(content=make_system_prompt(workspace))
             messages = [system_msg] + list(messages)
@@ -363,6 +399,11 @@ class CodingAgent:
         """
         工具执行节点: 执行 LLM 请求的工具调用 (不含 ask_user)。
         """
+        # 确保工具在正确的逻辑工作目录下执行
+        ws = state.get("workspace_dir")
+        if ws:
+            self.workspace_dir = ws
+            workspace_ctx.set_workspace(ws)
         result = self._executable_tool_node.invoke(state)
         return result
 

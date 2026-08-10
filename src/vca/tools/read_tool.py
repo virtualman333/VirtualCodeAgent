@@ -7,6 +7,8 @@ import json
 from pathlib import Path
 from langchain_core.tools import tool
 
+from ..workspace_ctx import get_workspace
+
 # ---- 可选依赖 ----
 try:
     from PIL import Image
@@ -127,14 +129,21 @@ def _read_notebook(path: str) -> str:
 
 
 def _resolve_path(path: str) -> str:
-    """智能路径解析：绝对路径 > 相对路径 > workspace/ 下查找"""
+    """智能路径解析：绝对路径 > 相对路径 > 逻辑工作目录/workspace 下查找"""
     if os.path.isabs(path) and os.path.exists(path):
         return path
     if os.path.exists(path):
         return os.path.abspath(path)
 
+    base = get_workspace() or os.getcwd()
+
+    # 逻辑工作目录下查找
+    alt = os.path.join(base, path)
+    if os.path.exists(alt):
+        return alt
+
     # workspace 目录下查找
-    alt = os.path.join(os.getcwd(), "workspace", path)
+    alt = os.path.join(base, "workspace", path)
     if os.path.exists(alt):
         return alt
 
@@ -166,9 +175,12 @@ def read_file(
         文件内容或元信息
     """
     if not os.path.exists(path):
-        alt = os.path.join(os.getcwd(), "workspace", path)
+        base = get_workspace() or os.getcwd()
+        alt = os.path.join(base, path)
         if os.path.exists(alt):
             path = alt
+        elif os.path.exists(os.path.join(base, "workspace", path)):
+            path = os.path.join(base, "workspace", path)
         else:
             return f"[ERROR] 文件不存在: {path}\n试试先用 Glob 查找文件位置"
 

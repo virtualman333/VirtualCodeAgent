@@ -5,6 +5,8 @@ from __future__ import annotations
 import os
 from langchain_core.tools import tool
 
+from ..workspace_ctx import get_workspace
+
 
 @tool
 def edit_file(path: str, old_string: str, new_string: str) -> str:
@@ -99,15 +101,21 @@ def edit_file(path: str, old_string: str, new_string: str) -> str:
 
 
 def _resolve_path(path: str) -> str:
-    """智能路径解析"""
+    """智能路径解析 (基于当前线程的逻辑工作目录)"""
     if os.path.isabs(path) and os.path.exists(path):
         return path
     if os.path.exists(path):
         return os.path.abspath(path)
 
-    alt = os.path.join(os.getcwd(), "workspace", path)
+    base = get_workspace() or os.getcwd()
+
+    alt = os.path.join(base, path)
+    if os.path.exists(alt):
+        return alt
+
+    alt = os.path.join(base, "workspace", path)
     if os.path.exists(alt):
         return alt
 
     # 文件尚未存在时（如 write/create），返回绝对路径
-    return os.path.abspath(path)
+    return os.path.join(base, path)

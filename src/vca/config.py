@@ -1,10 +1,29 @@
 """配置管理 - 从环境变量加载 LLM 和 Agent 配置"""
 
 import os
+import sys
 import json
 from pathlib import Path
 from dotenv import load_dotenv
 
+
+def _get_base_dir() -> Path:
+    """
+    获取配置文件的基准目录:
+    - PyInstaller 打包后 (sys.frozen): 可执行文件所在目录
+    - 源码运行: 项目根目录 (pyproject.toml / .env 所在目录)
+    """
+    if getattr(sys, "frozen", False):
+        return Path(sys.executable).resolve().parent
+    return Path(__file__).resolve().parents[2]
+
+
+# 基准目录 (exe 同目录 或 项目根目录)
+BASE_DIR = _get_base_dir()
+
+# 加载 .env 配置文件:
+# 优先级: 已存在的环境变量 > 基准目录(exe 同目录/项目根目录) > 当前工作目录
+load_dotenv(BASE_DIR / ".env")
 load_dotenv()
 
 # 历史记录文件路径

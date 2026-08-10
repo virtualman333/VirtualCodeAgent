@@ -8,6 +8,8 @@ import fnmatch
 from pathlib import Path
 from langchain_core.tools import tool
 
+from ..workspace_ctx import get_workspace
+
 # ---- 排除目录 ----
 _EXCLUDE_DIRS = {
     ".git",
@@ -218,17 +220,23 @@ def _grep_single_file(
 
 
 def _resolve_base(path: str) -> str:
-    """智能路径解析"""
+    """智能路径解析 (基于当前线程的逻辑工作目录)"""
     if os.path.isabs(path) and os.path.exists(path):
         return path
     if os.path.exists(path):
         return os.path.abspath(path)
 
-    alt = os.path.join(os.getcwd(), "workspace", path)
+    base = get_workspace() or os.getcwd()
+
+    alt = os.path.join(base, path)
     if os.path.exists(alt):
         return alt
 
-    return os.path.abspath(path)
+    alt = os.path.join(base, "workspace", path)
+    if os.path.exists(alt):
+        return alt
+
+    return os.path.join(base, path)
 
 
 def _is_binary(filepath: str) -> bool:

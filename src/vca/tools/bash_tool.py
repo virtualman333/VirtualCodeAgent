@@ -7,6 +7,8 @@ import subprocess
 import shutil
 from langchain_core.tools import tool
 
+from ..workspace_ctx import get_workspace
+
 # ---- 安全警告命令 ----
 _RISKY_COMMANDS = {
     "rm -rf /",
@@ -69,12 +71,14 @@ def bash(command: str, timeout: int = 120, description: str = "") -> str:
         pass
 
     try:
+        # 使用当前线程的逻辑工作目录 (SubAgent 环境隔离)
+        cwd = get_workspace() or os.getcwd()
         result = subprocess.run(
             command,
             shell=True,
             capture_output=True,
             timeout=timeout,
-            cwd=os.getcwd(),
+            cwd=cwd,
             env=os.environ.copy(),
             encoding="utf-8",
             errors="replace",

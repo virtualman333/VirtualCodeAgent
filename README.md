@@ -10,6 +10,8 @@
 - **工作空间管理** - 支持多项目切换，自动记录历史工作空间
 - **对话持久化** - 自动保存/恢复会话，支持历史对话回溯
 - **深度思考可视化** - 可折叠/展开 LLM 推理过程，支持精简与详细两种展示模式
+- **多 Agent 编排 (SubAgent)** - 通过 `create_agent` 创建独立子代理处理子任务，支持后台异步与并行执行，子代理拥有独立对话历史、工具池和隔离环境
+- **文件系统信箱** - 后台子代理结果通过文件系统消息目录传递，贯彻 "文件系统即上下文" 设计思想
 - **美观的终端 UI** - 基于 Rich 库，提供 Panel、Table、Markdown 渲染等
 
 ## 项目结构
@@ -25,10 +27,17 @@
         ├── config.py               # 配置管理（环境变量、工作空间历史）
         ├── state.py                # Agent 状态定义（TypedDict + reducer）
         ├── storage.py              # 会话持久化存储
+        ├── workspace_ctx.py        # 线程隔离的工作目录上下文（多 Agent 环境隔离）
         ├── main.py                 # CLI 主入口与交互循环
         ├── graph/
         │   ├── __init__.py
         │   └── workflow.py         # LangGraph 工作流定义
+        ├── subagents/              # 多 Agent 编排
+        │   ├── __init__.py
+        │   ├── types.py            # SubAgent 数据模型
+        │   ├── mailbox.py          # 文件系统信箱（Agent 间通信）
+        │   ├── manager.py          # 子代理生命周期管理（同步/后台/并行）
+        │   └── tools.py            # AgentTool 工具集（create_agent 等）
         └── tools/
             ├── __init__.py
             ├── read_tool.py        # 文件读取工具
@@ -120,6 +129,7 @@ my-project > 运行 pytest 并修复失败的测试
 | `/history` | 查看对话历史记录 |
 | `/load` | 恢复上一次对话 |
 | `/load <编号>` | 恢复指定编号的历史对话 |
+| `/agents` | 查看所有 SubAgent（子代理）状态 |
 | `/config` | 显示当前配置 |
 | `/save` | 手动保存当前对话 |
 | `/exit` | 退出程序 |
@@ -160,6 +170,63 @@ User Input → agent (LLM 推理) → tools (工具执行) → respond (生成�
 - `iteration` - 迭代计数器（防止无限循环）
 - `workspace_dir` - 当前工作空间路径
 - `pending_question` - 挂起的用户问题（AskUser 功能）
+
+## 多 Agent 编排 (SubAgent)
+
+主 Agent 通过 **AgentTool** 创建若干独立的 Agent Loop（SubAgent）来处理子任务，
+实现从"个体户"到"团队作业"的进化——主 Agent 扮演"包工头"，将任务下发给"员工"。
+
+### 核心优势
+
+- **独立上下文** - 每个 SubAgent 拥有独立的 system prompt、对话历史、工具池与隔离的工作目录，全部针对具体子任务设置，更专业、更安全
+- **防上下文污染** - SubAgent 只把与主线任务相关的精简结果返回给主 Agent，大段中间过程不会进入主线上下文
+- **后台异步** - SubAgent 可在后台线程独立运行，不影响主 Agent 继续处理主线任务
+- **并行执行** - 相互无依赖的子任务可通过多个后台 SubAgent 并行完成
+
+### AgentTool 工具
+
+| 工具 | 说明 |
+|------|------|
+| `create_agent(task, name?, instructions?, wait?, tools?, workspace?)` | 创建并启动子代理。`wait=True` 同步等待结果；`wait=False`（默认）后台运行并返回 `agent_id` |
+| `get_agent_result(agent_id, timeout?)` | 获取子代理结果。未完成时阻塞等待，最长 `timeout` 秒 |
+| `list_agents()` | 列出所有子代理及其状态 |
+| `delete_agent(agent_id)` | 删除子代理记录（内存 + 信箱） |
+
+编排示例（由主 Agent 的 LLM 自行决定）：
+
+```text
+任务: 同时分析项目的前端和后端结构
+→ create_agent(task="分析 src/frontend 目录结构并总结技术栈", name="前端分析", wait=False)
+→ create_agent(task="分析 src/backend 目录结构并总结 API 设计", name="后端分析", wait=False)
+→ get_agent_result(agent_id="sub_xxx_1")  → 得到精简结果
+→ get_agent_result(agent_id="sub_xxx_2")
+```
+
+### 隔离环境
+
+每个 SubAgent 通过 `workspace_ctx`（线程级 `contextvars`）拥有独立的工作目录，
+`bash` / `read_file` / `write_file` / `edit_file` / `glob_files` / `grep_content`
+等工具均按当前线程的逻辑工作目录解析路径，多个 Agent 并行时互不干扰。
+
+### 文件系统信箱
+
+参考 Claude Code 的 "文件系统即上下文" 设计，后台 SubAgent 完成后将结果写入
+文件系统的消息目录（信箱），主 Agent 无需复杂的消息队列即可读取：
+
+```
+~/.vca/agents/<agent_id>/
+├── status.json   # 状态 + 结果元信息
+└── result.txt    # 精简结果文本
+```
+
+- 主 Agent 重启后仍可通过 `get_agent_result` 从信箱恢复结果
+- CLI 中可用 `/agents` 命令查看所有子代理状态
+
+### 与 Skill 的联动
+
+- **Skill 包 Agent**：Skill 的 prompt 里写好编排策略，指挥 LLM 启动多个并行 SubAgent
+- **Agent 包 Skill**：把数千 tokens 的长 Skill prompt 交给隔离子代理执行（Fork），
+  仅返回精简结果，不污染主线对话
 
 ## 依赖
 
