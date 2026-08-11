@@ -25,8 +25,17 @@ except ImportError:
     HAS_PYPDF2 = False
 
 
-def _read_text(path: str, start_line: int | None, end_line: int | None) -> str:
-    """读取纯文本文件，支持行号范围"""
+# 单块最大字符数 (超过则触发自动分块)
+_CHUNK_MAX_CHARS = 8000
+
+
+def _read_text(
+    path: str,
+    start_line: int | None,
+    end_line: int | None,
+    chunk: int | None = None,
+) -> str:
+    """读取纯文本文件，支持行号范围 + 字符块读取"""
     abs_path = _resolve_path(path)
 
     with open(abs_path, "r", encoding="utf-8", errors="replace") as f:
@@ -34,22 +43,89 @@ def _read_text(path: str, start_line: int | None, end_line: int | None) -> str:
 
     total_lines = len(lines)
 
-    # 规范化行号
-    start = max(1, start_line or 1)
-    end = min(total_lines, end_line or total_lines)
+    # ---- 模式 1: 显式指定 chunk ----
+    if chunk is not None:
+        chunks = _build_chunks(lines)
+        if chunk < 1 or chunk > len(chunks):
+            return f"[ERROR] chunk {chunk} 不存在，共 {len(chunks)} 块 (1-{len(chunks)})"
+        c = chunks[chunk - 1]
+        selected = lines[c["start"] - 1 : c["end"]]
+        out_lines = []
+        for i, line in enumerate(selected, start=c["start"]):
+            out_lines.append(f"{i:>6}|{line.rstrip()}")
+        header = (
+            f"[OK] {path}  Chunk {chunk}/{len(chunks)} "
+            f"(L{c['start']}-L{c['end']} / 共 {total_lines} 行, {c['chars']} 字符)"
+        )
+        return header + "\n" + "\n".join(out_lines)
 
-    if start > total_lines:
-        return f"[INFO] 文件只有 {total_lines} 行，起始行 {start_line} 超出范围"
+    # ---- 模式 2: 行号范围 ----
+    if start_line or end_line:
+        start = max(1, start_line or 1)
+        end = min(total_lines, end_line or total_lines)
+        if start > total_lines:
+            return f"[INFO] 文件只有 {total_lines} 行，起始行 {start_line} 超出范围"
+        selected = lines[start - 1 : end]
+        out_lines = []
+        for i, line in enumerate(selected, start=start):
+            out_lines.append(f"{i:>6}|{line.rstrip()}")
+        header = f"[OK] {path}  (L{start}-L{end} / 共 {total_lines} 行)"
+        return header + "\n" + "\n".join(out_lines)
 
-    selected = lines[start - 1 : end]
+    # ---- 模式 3: 全文件 + 自动分块检测 ----
+    total_chars = sum(len(l) for l in lines)
+    if total_chars <= _CHUNK_MAX_CHARS:
+        out_lines = []
+        for i, line in enumerate(lines, start=1):
+            out_lines.append(f"{i:>6}|{line.rstrip()}")
+        header = f"[OK] {path}  (共 {total_lines} 行, {total_chars} 字符)"
+        return header + "\n" + "\n".join(out_lines)
 
-    # 添加行号
-    out_lines = []
-    for i, line in enumerate(selected, start=start):
-        out_lines.append(f"{i:>6}|{line.rstrip()}")
+    # 大文件: 返回分块索引, 让 LLM 用 chunk=N 精准读取
+    return _build_chunk_index(path, lines, total_lines, total_chars)
 
-    header = f"[OK] {path}  (L{start}-L{end} / 共 {total_lines} 行)"
-    return header + "\n" + "\n".join(out_lines)
+
+def _build_chunks(lines: list[str]) -> list[dict]:
+    """将文件按字符量切分为块, 每块不超过 _CHUNK_MAX_CHARS"""
+    chunks: list[dict] = []
+    cur_start = 1
+    cur_chars = 0
+
+    for idx, line in enumerate(lines, start=1):
+        cur_chars += len(line)
+        if cur_chars > _CHUNK_MAX_CHARS:
+            # 闭块: cur_start ~ idx-1
+            chunks.append(
+                {
+                    "start": cur_start,
+                    "end": idx - 1,
+                    "chars": cur_chars - len(line),
+                }
+            )
+            cur_start = idx
+            cur_chars = len(line)
+
+    # 最后一块
+    chunks.append({"start": cur_start, "end": len(lines), "chars": cur_chars})
+    return chunks
+
+
+def _build_chunk_index(path: str, lines: list[str], total_lines: int, total_chars: int) -> str:
+    """大文件: 构建分块索引, 指导 LLM 用 chunk=N 精准读取"""
+    chunks = _build_chunks(lines)
+    out = [
+        f"[INFO] {path} 较大 ({total_chars:,} 字符, {total_lines} 行)。",
+        f"已自动分为 {len(chunks)} 块。请用 read_file(path=..., chunk=N) 分块读取。",
+        "",
+        "分块索引:",
+    ]
+    for i, c in enumerate(chunks, 1):
+        out.append(
+            f"  Chunk {i:>3}: L{c['start']:>6}-L{c['end']:<6} ({c['chars']:>6,} 字符)"
+        )
+    out.append("")
+    out.append("示例: read_file(path=..., chunk=1)")
+    return "\n".join(out)
 
 
 def _read_pdf(path: str) -> str:
@@ -156,23 +232,30 @@ def read_file(
     path: str,
     start_line: int | None = None,
     end_line: int | None = None,
+    chunk: int | None = None,
 ) -> str:
     """
-    读取文件内容，支持多种格式和行号范围。
+    读取文件内容，支持多种格式、行号范围和自动分块。
 
     支持的格式:
-    - 纯文本 (.py, .js, .ts, .json, .md, .txt 等) — 可指定行号范围
+    - 纯文本 (.py, .js, .ts, .json, .md, .txt 等) — 支持行号范围/分块
     - PDF (.pdf) — 提取所有页面文本
     - 图片 (.png, .jpg, .jpeg, .gif, .webp, .bmp) — 返回元信息
     - Notebook (.ipynb) — 提取所有单元格源码
 
+    大文件处理 (自动分块):
+    - 不带任何参数读取大文件时，会返回分块索引（每块的行号范围）
+    - 用 chunk=N 精准读取第 N 块，无需自己猜测行号
+    - chunk 与 start_line/end_line 互斥，chunk 优先
+
     Args:
         path: 文件路径
         start_line: 起始行号 (1-based)，仅在文本模式下生效
-        end_line: 结束行号 (1-based, 含), 仅在文本模式下生效
+        end_line: 结束行号 (1-based, 含)，仅在文本模式下生效
+        chunk: 块号 (1-based)，读取自动分好的第 N 块（大文件推荐）
 
     Returns:
-        文件内容或元信息
+        文件内容、分块索引或元信息
     """
     if not os.path.exists(path):
         base = get_workspace() or os.getcwd()
@@ -204,16 +287,8 @@ def read_file(
         if suffix == ".ipynb":
             return _read_notebook(path)
 
-        # 默认: 文本文件
-        if file_size > 1024 * 1024 and not start_line and not end_line:
-            return (
-                f"[INFO] 文件较大 ({file_size:,} bytes)，建议指定行号范围读取。\n"
-                f"例如: read_file(path='{path}', start_line=1, end_line=100)\n\n"
-                f"前 50 行预览:\n"
-                + _read_text(path, 1, 50)
-            )
-
-        return _read_text(path, start_line, end_line)
+        # 默认: 文本文件 (自动分块)
+        return _read_text(path, start_line, end_line, chunk)
 
     except UnicodeDecodeError:
         return (

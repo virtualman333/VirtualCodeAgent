@@ -321,13 +321,17 @@ def main() -> None:
     )
     console.print()
 
-    # 6. 主事件循环
+    # 6. 创建带 Tab 补全的输入会话
+    from .input_handler import create_input_session, format_prompt
+
+    input_session = create_input_session(lambda: workspace_dir)
+
+    # 7. 主事件循环
     while True:
-        ws_name = os.path.basename(workspace_dir) or workspace_dir
-        prompt = f"[bold cyan]{ws_name}[/bold cyan] [dim]#{window_no}[/dim] > "
+        prompt = format_prompt(workspace_dir, window_no, verbose)
 
         try:
-            user_input = console.input(prompt).strip()
+            user_input = input_session.prompt(prompt).strip()
         except (KeyboardInterrupt, EOFError):
             if session_id or state.get("messages", []):
                 sid = storage.auto_save(state, session_id)

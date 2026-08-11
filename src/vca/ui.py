@@ -66,6 +66,9 @@ def show_help(verbose: bool = False) -> None:
   [cyan]/config[/cyan]      - 显示当前配置
   [cyan]/exit[/cyan]        - 退出程序
 
+[bold]执行控制:[/bold]
+  [cyan]Ctrl+C[/cyan]       - 随时打断 Agent 执行 (可继续/输入指令/取消)
+
 [bold]输入编程任务描述，Agent 将自动完成。[/bold]
 例如:
   • 在当前目录创建一个 hello.py 文件

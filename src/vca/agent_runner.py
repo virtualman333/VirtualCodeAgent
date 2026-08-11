@@ -257,7 +257,7 @@ def run_agent(
     """
     state["messages"].append(HumanMessage(content=user_input))
 
-    # --- 外层循环: 处理 ask_user 暂停/恢复 ---
+    # --- 外层循环: 处理 ask_user 暂停/恢复 + 打断/指令 ---
     while True:
         total_tools = 0     # 工具调用总次数
         has_respond = False
@@ -340,6 +340,32 @@ def run_agent(
                 # 每步后检查 ask_user 挂起
                 if state.get("pending_question"):
                     break
+
+        except KeyboardInterrupt:
+            # ---- 用户按 Ctrl+C 打断 ----
+            console.print()
+            console.print("[yellow]⏸ 已打断当前执行[/yellow]")
+
+            from .interrupt import handle_interrupt, read_interrupt_command, InterruptChoice
+
+            choice = handle_interrupt()
+
+            if choice == InterruptChoice.COMMAND:
+                cmd = read_interrupt_command()
+                if cmd:
+                    # 注入新指令, 重新 stream (消息历史已含已完成部分)
+                    state["messages"].append(HumanMessage(content=f"[打断后指令] {cmd}"))
+                    console.print("[dim]已注入指令, 继续执行...[/dim]")
+                    continue
+                # 无指令 → 继续
+                continue
+            elif choice == InterruptChoice.RESUME:
+                console.print("[dim]继续执行...[/dim]")
+                continue
+            else:
+                console.print("[dim]任务已取消[/dim]")
+                console.print()
+                return
 
         except Exception as e:
             console.print("[red bold]Error:[/red bold]")
