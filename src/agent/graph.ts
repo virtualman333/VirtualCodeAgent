@@ -24,6 +24,8 @@ import { StateAnnotation, type AgentState, type LlmUsage } from "./state.js";
 import { buildSystemPrompt } from "./prompts.js";
 import { Config } from "../config.js";
 import { ALL_TOOLS, EXECUTABLE_TOOLS } from "../tools/index.js";
+import { mcpManager } from "../mcp/manager.js";
+import type { StructuredToolInterface } from "@langchain/core/tools";
 import { setWorkspace } from "../workspace_ctx.js";
 
 // ============================================================
@@ -249,8 +251,10 @@ export class CodingAgent {
   executableToolNode: ToolNode;
   graph: ReturnType<typeof buildGraph>;
   workspace_dir = "";
+  allTools: StructuredToolInterface[];
+  mcpTools: StructuredToolInterface[];
 
-  constructor() {
+  constructor(mcpTools: StructuredToolInterface[] = []) {
     Config.validate();
 
     this.llm = new ChatOpenAI({
@@ -267,8 +271,13 @@ export class CodingAgent {
       temperature: 0.0,
     });
 
-    this.llmWithTools = this.llm.bindTools(ALL_TOOLS);
-    this.executableToolNode = new ToolNode(EXECUTABLE_TOOLS);
+    // 动态工具池: 内置 + Skills + MCP
+    this.mcpTools = mcpTools;
+    this.allTools = [...ALL_TOOLS, ...mcpTools];
+    const executable = [...EXECUTABLE_TOOLS, ...mcpTools];
+
+    this.llmWithTools = this.llm.bindTools(this.allTools);
+    this.executableToolNode = new ToolNode(executable);
     this.graph = buildGraph(this);
   }
 
@@ -429,7 +438,28 @@ export function buildGraph(agent: CodingAgent) {
   return workflow.compile();
 }
 
-export function createCodingAgent(): CodingAgent {
+let cachedMcpTools: StructuredToolInterface[] | null = null;
+let connectingMcp: Promise<StructuredToolInterface[]> | null = null;
+
+/** 连接 MCP (仅一次, 缓存工具列表) */
+async function connectMcpOnce(): Promise<StructuredToolInterface[]> {
+  if (cachedMcpTools) return cachedMcpTools;
+  if (!connectingMcp) {
+    connectingMcp = (async () => {
+      try {
+        await mcpManager.connect();
+      } catch (e) {
+        console.log(`[VCA] MCP 连接失败: ${(e as Error).message}`);
+      }
+      cachedMcpTools = mcpManager.tools;
+      return cachedMcpTools;
+    })();
+  }
+  return connectingMcp;
+}
+
+export async function createCodingAgent(): Promise<CodingAgent> {
   Config.validate();
-  return new CodingAgent();
+  const mcpTools = await connectMcpOnce();
+  return new CodingAgent(mcpTools);
 }

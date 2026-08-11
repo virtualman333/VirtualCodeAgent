@@ -1,0 +1,40 @@
+{
+  "name": "vca-coding-agent",
+  "displayName": "VCA Coding Agent",
+  "description": "Virtual Code Agent - LangGraph.js 驱动的编码 Agent，在 IDE 内直接对话完成任务",
+  "version": "0.1.0",
+  "publisher": "vca",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": ["Other"],
+  "activationEvents": [],
+  "main": "./dist/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "vca.openChat",
+        "title": "VCA: 打开 Coding Agent 聊天面板",
+        "category": "VCA"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "vca.openChat",
+          "when": "workspaceFolderCount >= 0"
+        }
+      ]
+    }
+  },
+  "scripts": {
+    "compile": "node ../scripts/build-extension.mjs",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^22.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.6.0"
+  }
+}

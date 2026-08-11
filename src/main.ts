@@ -7,7 +7,7 @@ import path from "node:path";
 import { SystemMessage } from "@langchain/core/messages";
 
 import { Config, CONFIG_FILE, EDITABLE_KEYS, SESSIONS_DIR } from "./config.js";
-import { CodingAgent, makeSystemPrompt } from "./agent/graph.js";
+import { CodingAgent, createCodingAgent, makeSystemPrompt } from "./agent/graph.js";
 import { createInitialState, type AgentState } from "./agent/state.js";
 import { runAgent } from "./agent/runner.js";
 import { selectWorkspace, switchWorkspace } from "./workspace.js";
@@ -358,7 +358,7 @@ async function main(): Promise<void> {
   print(dim("正在初始化 Agent..."));
   let agent: CodingAgent;
   try {
-    agent = new CodingAgent();
+    agent = await createCodingAgent();
   } catch (e) {
     print(red(`Agent 初始化失败: ${(e as Error).message}`));
     process.exit(1);

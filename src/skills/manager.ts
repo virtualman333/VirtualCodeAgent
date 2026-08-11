@@ -17,7 +17,7 @@ import fs from "node:fs";
 import path from "node:path";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
-import yaml from "js-yaml";
+import * as yaml from "js-yaml";
 
 import { SKILLS_DIR } from "../config.js";
 import { getWorkspace } from "../workspace_ctx.js";

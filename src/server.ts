@@ -11,11 +11,8 @@ import { fileURLToPath } from "node:url";
 import { WebSocketServer, WebSocket } from "ws";
 
 import { Config, CONFIG_FILE } from "./config.js";
-import { CodingAgent } from "./agent/graph.js";
-import { createInitialState, type AgentState } from "./agent/state.js";
-import { runAgentForWeb, type WebEvent } from "./agent/web_runner.js";
-import { setWorkspace } from "./workspace_ctx.js";
-import { loadSession, saveSession, generateSessionId } from "./storage.js";
+import { AgentSession } from "./agent/session.js";
+import type { WebEvent } from "./agent/web_runner.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIST = path.resolve(__dirname, "..", "web", "dist");
@@ -65,66 +62,6 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): void 
 }
 
 // ============================================================
-// WebSocket 会话管理
-// ============================================================
-
-interface ClientSession {
-  state: AgentState;
-  waitingResolve: ((answer: string | null) => void) | null;
-  cancelled: boolean;
-  running: boolean;
-}
-
-const clients = new Map<WebSocket, ClientSession>();
-
-function send(ws: WebSocket, event: WebEvent): void {
-  if (ws.readyState === WebSocket.OPEN) {
-    ws.send(JSON.stringify(event));
-  }
-}
-
-async function handleChat(ws: WebSocket, sess: ClientSession, content: string): Promise<void> {
-  if (sess.running) {
-    send(ws, { type: "info", text: "Agent 正在执行中，请先等待完成" });
-    return;
-  }
-  sess.running = true;
-  sess.cancelled = false;
-
-  const agent = new CodingAgent();
-
-  send(ws, { type: "info", text: "任务开始执行..." });
-
-  await runAgentForWeb({
-    agent,
-    state: sess.state,
-    userInput: content,
-    send: (e) => send(ws, e),
-    waitAnswer: (pending) =>
-      new Promise<string | null>((resolve) => {
-        sess.waitingResolve = resolve;
-      }),
-    isCancelled: () => sess.cancelled,
-  });
-
-  // 自动保存会话
-  try {
-    if (!sess.state.workspace_dir) sess.state.workspace_dir = Config.WORKSPACE_DIR;
-    const sid = saveSession(
-      sess.state.session_id ?? generateSessionId(),
-      sess.state.messages,
-      sess.state.workspace_dir
-    );
-    sess.state.session_id = sid;
-  } catch {
-    /* 保存失败不影响运行 */
-  }
-
-  sess.running = false;
-  sess.waitingResolve = null;
-}
-
-// ============================================================
 // 主入口
 // ============================================================
 
@@ -153,21 +90,17 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server, path: "/ws" });
 
 wss.on("connection", (ws) => {
-  // 每个连接对应一个独立会话
-  const sess: ClientSession = {
-    state: createInitialState(Config.WORKSPACE_DIR),
-    waitingResolve: null,
-    cancelled: false,
-    running: false,
+  const session = new AgentSession(Config.WORKSPACE_DIR);
+  const emit = (e: WebEvent): void => {
+    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(e));
   };
-  clients.set(ws, sess);
 
-  send(ws, {
+  emit({
     type: "info",
     text: `已连接。模型: ${Config.OPENAI_MODEL} | 工作空间: ${Config.WORKSPACE_DIR}`,
   });
   if (!Config.OPENAI_API_KEY) {
-    send(ws, { type: "info", text: `[WARN] OPENAI_API_KEY 未设置，请编辑: ${CONFIG_FILE}` });
+    emit({ type: "info", text: `[WARN] OPENAI_API_KEY 未设置，请编辑: ${CONFIG_FILE}` });
   }
 
   ws.on("message", async (raw) => {
@@ -181,71 +114,31 @@ wss.on("connection", (ws) => {
 
     if (type === "chat") {
       const content = String(msg.content ?? "").trim();
-      if (content) {
-        await handleChat(ws, sess, content);
-      }
+      if (content) await session.chat(content, emit);
     } else if (type === "answer") {
-      // 回答 ask_user 提问
-      if (sess.waitingResolve) {
-        const content = String(msg.content ?? "").trim();
-        const resolve = sess.waitingResolve;
-        sess.waitingResolve = null;
-        resolve(content ? `用户回答: ${content}` : "[用户选择跳过]");
-      }
+      const content = String(msg.content ?? "").trim();
+      session.answer(content ? `用户回答: ${content}` : "[用户选择跳过]");
     } else if (type === "answer_option") {
-      if (sess.waitingResolve) {
-        const option = String(msg.content ?? "").trim();
-        const resolve = sess.waitingResolve;
-        sess.waitingResolve = null;
-        resolve(option ? `用户选择了: ${option}` : "[用户选择跳过]");
-      }
+      const option = String(msg.content ?? "").trim();
+      session.answer(option ? `用户选择了: ${option}` : "[用户选择跳过]");
     } else if (type === "skip_question") {
-      if (sess.waitingResolve) {
-        const resolve = sess.waitingResolve;
-        sess.waitingResolve = null;
-        resolve("[用户选择跳过]");
-      }
+      session.answer("[用户选择跳过]");
     } else if (type === "cancel") {
-      sess.cancelled = true;
-      if (sess.waitingResolve) {
-        const resolve = sess.waitingResolve;
-        sess.waitingResolve = null;
-        resolve(null);
-      }
+      session.cancel();
     } else if (type === "restore") {
-      // 恢复最近会话 (可选)
-      const last = loadSession(String(msg.session_id ?? ""));
-      if (last) {
-        sess.state = {
-          ...createInitialState(last.workspace_dir || Config.WORKSPACE_DIR),
-          messages: last.messages,
-        };
-        send(ws, {
-          type: "info",
-          text: `已恢复会话「${last.title}」(${last.messages.length} 条消息)`,
-        });
-      } else {
-        send(ws, { type: "info", text: "会话不存在" });
-      }
+      const count = session.restore(String(msg.session_id ?? ""));
+      emit({ type: "info", text: count > 0 ? `已恢复会话 (${count} 条消息)` : "会话不存在" });
     } else if (type === "workspace") {
       const dir = String(msg.path ?? "");
       if (dir) {
-        const abs = path.resolve(Config.WORKSPACE_DIR, dir);
-        try {
-          fs.mkdirSync(abs, { recursive: true });
-          sess.state.workspace_dir = abs;
-          setWorkspace(abs);
-          send(ws, { type: "info", text: `已切换工作空间: ${abs}` });
-        } catch (e) {
-          send(ws, { type: "info", text: `切换失败: ${(e as Error).message}` });
-        }
+        const ok = session.setWorkspace(dir);
+        emit({ type: "info", text: ok ? `已切换工作空间: ${session.state.workspace_dir}` : `切换失败: ${dir}` });
       }
     }
   });
 
   ws.on("close", () => {
-    sess.cancelled = true;
-    clients.delete(ws);
+    session.cancel();
   });
 });
 
