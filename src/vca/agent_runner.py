@@ -114,6 +114,46 @@ def _render_agent_step(node_output: dict, verbose: bool) -> None:
                 )
 
 
+def _render_plan_tool(msg: ToolMessage, verbose: bool) -> None:
+    """
+    渲染 plan 工具的返回值 (任务计划面板)。
+    仅显示计划列表，不显示冗余文本。
+    """
+    content = str(msg.content or "")
+    # 提取计划行: "N. ✅ 描述"
+    plan_lines = []
+    for line in content.splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        # 跳过标题行
+        if line.startswith("**") or line.startswith("[") or "不存在" in line or "无效" in line:
+            continue
+        if len(line) > 2 and (line[1] == "." or line[:2].isdigit()):
+            plan_lines.append(line)
+
+    if not plan_lines:
+        return
+
+    # 状态 → 颜色
+    def _color(line: str) -> str:
+        if "✅" in line:
+            return f"[green]{line}[/green]"
+        if "🔄" in line:
+            return f"[cyan]{line}[/cyan]"
+        if "❌" in line:
+            return f"[red]{line}[/red]"
+        return f"[dim]{line}[/dim]"
+
+    console.print(
+        Panel(
+            "\n".join(_color(l) for l in plan_lines),
+            title="[bold blue]📋 任务计划[/bold blue]",
+            border_style="blue",
+        )
+    )
+
+
 def _render_ask_user(pending: dict) -> str | None:
     """
     渲染 ask_user 交互式问题，收集用户回答。
@@ -251,13 +291,18 @@ def run_agent(
                             sum_total += usage.get("total_tokens", 0) or 0
                             sum_llm_ms += usage.get("duration_ms", 0) or 0
 
-                    # --- tools 节点 (执行结果, 不显示) ---
+                    # --- tools 节点 (执行结果, 不显示; plan 工具除外) ---
                     elif node_name == "tools":
                         for msg in node_output.get("messages", []):
-                            if isinstance(msg, ToolMessage):
-                                if msg.content != "[AWAITING_USER_INPUT]":
-                                    total_tools += 1
-                                state["messages"].append(msg)
+                            if not isinstance(msg, ToolMessage):
+                                continue
+                            if msg.content != "[AWAITING_USER_INPUT]":
+                                total_tools += 1
+                            state["messages"].append(msg)
+
+                            # plan 工具 (todo_*) 的结果渲染为计划面板
+                            if getattr(msg, "name", "") in ("todo_create", "todo_update", "todo_list"):
+                                _render_plan_tool(msg, verbose)
 
                         tool_usage = node_output.get("tool_usage") or {}
                         if tool_usage:

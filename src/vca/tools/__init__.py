@@ -22,6 +22,9 @@ from ..skills.manager import list_skills, load_skill
 # 🤝 多 Agent (SubAgent 编排)
 from ..subagents.tools import create_agent, get_agent_result, list_agents, delete_agent
 
+# 📋 计划/Todo (仿 Claude Code TodoWrite)
+from .plan_tool import todo_create, todo_update, todo_list
+
 __all__ = [
     "read_file",
     "glob_files",
@@ -32,6 +35,9 @@ __all__ = [
     "ask_user",
     "list_skills",
     "load_skill",
+    "todo_create",
+    "todo_update",
+    "todo_list",
     "create_agent",
     "get_agent_result",
     "list_agents",
@@ -52,11 +58,14 @@ BUILTIN_TOOLS = [
 # Skill 工具
 SKILL_TOOLS = [list_skills, load_skill]
 
+# 计划工具
+PLAN_TOOLS = [todo_create, todo_update, todo_list]
+
 # 多 Agent 工具
 AGENT_TOOLS = [create_agent, get_agent_result, list_agents, delete_agent]
 
 # 全部工具注册给 LangGraph 使用 (MCP 工具由工作流动态追加)
-ALL_TOOLS = BUILTIN_TOOLS + SKILL_TOOLS + AGENT_TOOLS
+ALL_TOOLS = BUILTIN_TOOLS + SKILL_TOOLS + PLAN_TOOLS + AGENT_TOOLS
 
 # 可执行工具 (不含 ask_user，它需要特殊拦截)
 EXECUTABLE_TOOLS = [t for t in ALL_TOOLS if t.name != "ask_user"]

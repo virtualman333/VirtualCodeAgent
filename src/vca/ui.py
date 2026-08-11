@@ -61,6 +61,7 @@ def show_help(verbose: bool = False) -> None:
   [cyan]/save[/cyan]        - 手动保存当前对话
   [cyan]/skills[/cyan]      - 查看可用的专业技能
   [cyan]/mcp[/cyan]         - 查看 MCP server 连接状态
+  [cyan]/todo[/cyan]        - 查看当前任务计划 (Agent 自动创建)
   [cyan]/agents[/cyan]      - 查看所有 SubAgent（子代理）状态
   [cyan]/config[/cyan]      - 显示当前配置
   [cyan]/exit[/cyan]        - 退出程序

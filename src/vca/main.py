@@ -119,6 +119,17 @@ def _refresh_system_prompt(state, workspace_dir: str) -> None:
 # 命令分发
 # ============================================================
 
+def _format_todo_list(plan: list[dict]) -> str:
+    """将 plan 数据结构格式化为文本 (供 /todo 命令渲染)"""
+    from .tools.plan_tool import _STATUS_ICONS
+
+    lines = ["**任务计划:**"]
+    for i, step in enumerate(plan, 1):
+        icon = _STATUS_ICONS.get(step.get("status", "pending"), "🔲")
+        lines.append(f"{i}. {icon} {step.get('description', '')}")
+    return "\n".join(lines)
+
+
 _EDITABLE_KEYS = {
     "OPENAI_API_KEY", "OPENAI_BASE_URL", "OPENAI_MODEL",
     "WORKSPACE_DIR", "MAX_TOOL_ITERATIONS", "MAX_CONTEXT_TOKENS",
@@ -212,6 +223,19 @@ def _handle_command(
 
     elif cmd == "/mcp":
         _show_mcp()
+
+    elif cmd == "/todo":
+        from .tools.plan_tool import get_current_plan
+
+        plan = get_current_plan()
+        if not plan:
+            console.print("[dim]当前无计划 (Agent 在多步任务时会自动创建)[/dim]")
+        else:
+            from .agent_runner import _render_plan_tool
+            _render_plan_tool(
+                type("M", (), {"content": _format_todo_list(plan), "name": "todo_list"})(),
+                verbose,
+            )
 
     elif cmd == "/agents":
         _show_agents()
