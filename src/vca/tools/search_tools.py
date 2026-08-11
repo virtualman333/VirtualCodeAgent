@@ -35,6 +35,36 @@ def _should_skip_dir(dirname: str) -> bool:
     return dirname in _EXCLUDE_DIRS or dirname.startswith(".")
 
 
+def _match_glob(rel_path: str, pattern: str) -> bool:
+    """
+    glob 模式匹配，正确处理 ** 通配符。
+
+    两个关键修复 (fnmatch 的缺陷):
+    1. '**/X' 应匹配根目录的 X (0 级目录), 而 fnmatch 的 ** 不匹配 0 级
+    2. 不含 ** 的模式按路径段匹配, 避免 '*' 跨目录 (如 '*.py' 不匹配 'src/x.py')
+    """
+    # **/ 前缀: 也应匹配根目录 (0 级目录)
+    if pattern.startswith("**/"):
+        base_pattern = pattern[3:]
+        if fnmatch.fnmatch(rel_path, base_pattern):
+            return True
+        return fnmatch.fnmatch(rel_path, pattern)
+
+    # 不含 ** 的模式: 按路径段逐段匹配
+    if "**" not in pattern:
+        pat_parts = pattern.split("/")
+        path_parts = rel_path.split("/")
+        if len(path_parts) != len(pat_parts):
+            return False
+        return all(
+            fnmatch.fnmatch(p, pt)
+            for p, pt in zip(path_parts, pat_parts)
+        )
+
+    # 含中间 ** (如 src/**/*.tsx): 回退 fnmatch
+    return fnmatch.fnmatch(rel_path, pattern)
+
+
 # ============================================================
 # Glob - 按文件名模式搜索
 # ============================================================
@@ -74,7 +104,7 @@ def glob_files(pattern: str, path: str = ".") -> str:
 
         for fname in files:
             rel_path = os.path.join(root_rel, fname) if root_rel else fname
-            if fnmatch.fnmatch(rel_path, pattern):
+            if _match_glob(rel_path, pattern):
                 matches.append(rel_path)
 
     if not matches:

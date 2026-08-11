@@ -266,12 +266,18 @@ class CodingAgent:
         if not body:
             return messages
 
-        # Step 1: 压缩工具结果
+        # 压缩工具结果 (智能截断: 保留头尾)
+        # 阈值 15000 字符, 确保 read_file chunk (8000) 和 bash 输出 (10000) 正常可见
         for i, msg in enumerate(body):
-            if isinstance(msg, ToolMessage) and len(str(msg.content)) > 600:
+            if isinstance(msg, ToolMessage) and len(str(msg.content)) > 15000:
                 old_content = str(msg.content)
+                head = old_content[:12000]
+                tail = old_content[-3000:]
                 body[i] = ToolMessage(
-                    content=old_content[:500] + f"\n... (原始输出 {len(old_content)} 字符已被截断)",
+                    content=(
+                        f"{head}\n\n... (原始输出 {len(old_content)} 字符, "
+                        f"中间已省略) ...\n\n{tail}"
+                    ),
                     tool_call_id=msg.tool_call_id,
                     name=getattr(msg, "name", ""),
                 )
@@ -295,12 +301,17 @@ class CodingAgent:
                 turn_boundaries.append(i)
 
         if len(turn_boundaries) <= keep_turns:
-            # 轮次不多 说明是工具结果太大，激进压缩
+            # 轮次不多 说明是工具结果太大，激进压缩 (仍保留头尾)
             for i, msg in enumerate(body):
-                if isinstance(msg, ToolMessage) and len(str(msg.content)) > 300:
+                if isinstance(msg, ToolMessage) and len(str(msg.content)) > 8000:
                     old_content = str(msg.content)
+                    head = old_content[:6000]
+                    tail = old_content[-2000:]
                     body[i] = ToolMessage(
-                        content=old_content[:200] + f"\n... (原始 {len(old_content)} 字符被截断)",
+                        content=(
+                            f"{head}\n\n... (原始输出 {len(old_content)} 字符, "
+                            f"中间已省略) ...\n\n{tail}"
+                        ),
                         tool_call_id=msg.tool_call_id,
                         name=getattr(msg, "name", ""),
                     )

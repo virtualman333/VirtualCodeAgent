@@ -89,16 +89,26 @@ def bash(command: str, timeout: int = 120, description: str = "") -> str:
             parts.append(f"[OK] BASH: {description}")
 
         if result.stdout:
-            # 截断过长的输出
+            # 智能截断: 保留头尾 (头部是过程, 尾部是结果/错误)
             stdout = result.stdout
-            if len(stdout) > 10000:
-                stdout = stdout[:10000] + f"\n... (输出截断，共 {len(result.stdout):,} 字符)"
+            if len(stdout) > 15000:
+                head = stdout[:12000]
+                tail = stdout[-3000:]
+                stdout = (
+                    f"{head}\n\n... (输出共 {len(result.stdout):,} 字符, "
+                    f"中间已省略) ...\n\n{tail}"
+                )
             parts.append(stdout.rstrip())
 
         if result.stderr:
             stderr = result.stderr
-            if len(stderr) > 2000:
-                stderr = stderr[:2000] + f"\n... (stderr 截断，共 {len(result.stderr):,} 字符)"
+            if len(stderr) > 3000:
+                head = stderr[:2000]
+                tail = stderr[-1000:]
+                stderr = (
+                    f"{head}\n\n... (stderr 共 {len(result.stderr):,} 字符, "
+                    f"中间已省略) ...\n\n{tail}"
+                )
             parts.append(f"[STDERR]\n{stderr.rstrip()}")
 
         if result.returncode != 0:
