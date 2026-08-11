@@ -1,28 +1,4 @@
-# Python
-__pycache__/
-*.py[cod]
-*.so
-*.egg-info/
+node_modules/
 dist/
-build/
-*.spec
-.eggs/
-
-# Virtual environments
-venv/
-.venv/
-env/
-
-# IDE
-.vscode/
-.idea/
-*.swp
-*.swo
-
-# OS
-.DS_Store
-Thumbs.db
-
-# Agent runtime (配置已迁移到 ~/.vca/)
-workspace/
+*.log
 .vca/
