@@ -6,6 +6,12 @@ const props = defineProps<{
   args: Record<string, unknown>;
   result?: string;
   running: boolean;
+  /** 是否显示"在编辑器中打开"按钮 (VS Code 环境) */
+  showOpen?: boolean;
+}>();
+
+const emit = defineEmits<{
+  (e: "open-file", path: string, line?: number): void;
 }>();
 
 const expanded = ref(false);
@@ -20,6 +26,23 @@ const resultPreview = computed(() => {
   if (!props.result) return "";
   return props.result.length > 2000 ? props.result.slice(0, 2000) + "\n... (结果已截断)" : props.result;
 });
+
+/** 工具涉及的文件路径 (read/edit/write 的 path 参数) */
+const filePath = computed<string | null>(() => {
+  const p = props.args?.path;
+  return typeof p === "string" && p.trim() ? p.trim() : null;
+});
+
+/** 从 edit 结果解析行号 (如 "第 5 行" / "第 3-7 行") */
+const fileLine = computed<number | undefined>(() => {
+  if (!props.result) return undefined;
+  const m = props.result.match(/第\s*(\d+)\s*(?:-(\d+))?\s*行/);
+  return m ? Number(m[1]) : undefined;
+});
+
+function onOpenFile(): void {
+  if (filePath.value) emit("open-file", filePath.value, fileLine.value);
+}
 </script>
 
 <template>
@@ -28,6 +51,12 @@ const resultPreview = computed(() => {
       <span class="dot" />
       <span class="tool-name">→ {{ name }}</span>
       <span class="tool-args">{{ argsText }}</span>
+      <button
+        v-if="showOpen && filePath && !running"
+        class="open-btn"
+        title="在编辑器中打开文件"
+        @click.stop="onOpenFile"
+      >📄</button>
       <span class="state">{{ running ? "运行中..." : "✓ 完成" }}</span>
       <span class="chevron">{{ expanded ? "▾" : "▸" }}</span>
     </div>
@@ -91,6 +120,20 @@ const resultPreview = computed(() => {
   white-space: nowrap;
   text-overflow: ellipsis;
   flex: 1;
+}
+.open-btn {
+  background: transparent;
+  border: 1px solid var(--border);
+  border-radius: 4px;
+  color: var(--text-dim);
+  font-size: 12px;
+  padding: 1px 5px;
+  flex-shrink: 0;
+  line-height: 1.4;
+}
+.open-btn:hover {
+  border-color: var(--accent);
+  background: rgba(76, 154, 255, 0.12);
 }
 .state {
   font-size: 11px;

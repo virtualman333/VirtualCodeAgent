@@ -284,16 +284,59 @@ button {
 }
 .input-area textarea {
   flex: 1;
-  resize: none;
+  resize: vertical; /* 可拖拽调节高度 */
   background: var(--bg-input);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   color: var(--text);
   padding: 10px 14px;
   font-size: 14px;
-  line-height: 1.5;
-  max-height: 120px;
+  line-height: 1.6;
+  min-height: 64px; /* 更高的输入框 */
+  max-height: 180px;
   font-family: inherit;
+}
+.input-area textarea::-webkit-resizer {
+  background: var(--border);
+  border-radius: 0 0 var(--radius) 0;
+}
+
+/* 模型切换条 */
+.model-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+.model-bar label {
+  font-size: 12px;
+  color: var(--text-dim);
+}
+.model-select {
+  background: var(--bg-input);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+  color: var(--text);
+  padding: 3px 8px;
+  font-size: 12px;
+  max-width: 180px;
+  cursor: pointer;
+}
+.model-select:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+.model-select:focus {
+  outline: none;
+  border-color: var(--accent);
+}
+.model-base {
+  font-size: 11px;
+  color: var(--text-dim);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  max-width: 200px;
 }
 .input-area textarea:focus {
   outline: none;
@@ -318,6 +361,71 @@ button {
 }
 .input-area .btn.stop {
   background: var(--red);
+}
+
+/* ============================================================
+   VS Code 侧边栏适配
+   ============================================================ */
+
+/* 窄屏 (< 900px): 隐藏右侧面板，聊天区占满 */
+@media (max-width: 900px) {
+  .side {
+    display: none;
+  }
+  .messages {
+    padding: 14px;
+  }
+  .msg {
+    max-width: 100%;
+  }
+  .msg.user {
+    max-width: 100%;
+  }
+  .msg.final {
+    padding: 12px 14px;
+  }
+}
+
+/* VS Code Webview 环境: 更紧凑的边距，充分利用窄侧边栏 */
+.app.is-vscode {
+  font-size: 13px;
+}
+.app.is-vscode .topbar {
+  padding: 6px 12px;
+  gap: 10px;
+}
+.app.is-vscode .topbar .logo {
+  font-size: 13px;
+}
+.app.is-vscode .conn {
+  font-size: 11px;
+}
+.app.is-vscode .messages {
+  padding: 12px 14px;
+  gap: 10px;
+}
+.app.is-vscode .input-area {
+  padding: 8px 14px 12px;
+  gap: 8px;
+}
+.app.is-vscode .input-area textarea {
+  min-height: 56px;
+  font-size: 13px;
+  padding: 8px 12px;
+}
+.app.is-vscode .input-area .btn {
+  padding: 8px 14px;
+  font-size: 13px;
+}
+.app.is-vscode .think-head {
+  padding: 6px 10px;
+}
+.app.is-vscode .think-body {
+  padding: 8px 10px;
+  font-size: 12.5px;
+}
+.app.is-vscode .msg {
+  line-height: 1.55;
 }
 
 /* ============================================================

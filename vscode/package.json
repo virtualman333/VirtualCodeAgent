@@ -12,10 +12,34 @@
   "activationEvents": [],
   "main": "./dist/extension.js",
   "contributes": {
+    "viewsContainers": {
+      "activitybar": [
+        {
+          "id": "vca-sidebar",
+          "title": "VCA Coding Agent",
+          "icon": "media/vca.svg"
+        }
+      ]
+    },
+    "views": {
+      "vca-sidebar": [
+        {
+          "type": "webview",
+          "id": "vca.chatView",
+          "name": "聊天",
+          "icon": "media/vca.svg"
+        }
+      ]
+    },
     "commands": [
       {
         "command": "vca.openChat",
         "title": "VCA: 打开 Coding Agent 聊天面板",
+        "category": "VCA"
+      },
+      {
+        "command": "vca.sendSelection",
+        "title": "VCA: 发送选中代码到 Agent",
         "category": "VCA"
       }
     ],
@@ -24,6 +48,24 @@
         {
           "command": "vca.openChat",
           "when": "workspaceFolderCount >= 0"
+        },
+        {
+          "command": "vca.sendSelection",
+          "when": "editorHasSelection"
+        }
+      ],
+      "view/title": [
+        {
+          "command": "vca.openChat",
+          "when": "view == vca.chatView",
+          "group": "navigation"
+        }
+      ],
+      "editor/context": [
+        {
+          "command": "vca.sendSelection",
+          "when": "editorHasSelection",
+          "group": "VCA@1"
         }
       ]
     }

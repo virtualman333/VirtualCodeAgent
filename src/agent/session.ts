@@ -15,21 +15,42 @@ import { createCodingAgent } from "./graph.js";
 import { createInitialState, type AgentState } from "./state.js";
 import { runAgentForWeb, type WebEvent } from "./web_runner.js";
 import { saveSession, generateSessionId, loadSession } from "../storage.js";
-import { Config } from "../config.js";
+import { Config, type ModelConfig } from "../config.js";
 import { setWorkspace } from "../workspace_ctx.js";
 
 export class AgentSession {
   state: AgentState;
+  /** 当前使用的模型名 (对应 Config.getModels() 中的 name) */
+  modelName: string;
   private waitingResolve: ((answer: string | null) => void) | null = null;
   private cancelled = false;
   private running = false;
 
   constructor(workspaceDir: string) {
     this.state = createInitialState(workspaceDir);
+    this.modelName = Config.getDefaultModelName();
   }
 
   get isRunning(): boolean {
     return this.running;
+  }
+
+  /** 当前模型配置 */
+  getModel(): ModelConfig {
+    return Config.getModelConfig(this.modelName);
+  }
+
+  /** 所有可选模型 (供前端下拉) */
+  getModels(): ModelConfig[] {
+    return Config.getModels();
+  }
+
+  /** 切换模型 (返回是否成功) */
+  setModel(name: string): boolean {
+    const model = Config.getModelConfig(name);
+    if (!model) return false;
+    this.modelName = model.name;
+    return true;
   }
 
   /**
@@ -46,7 +67,8 @@ export class AgentSession {
     this.waitingResolve = null;
 
     try {
-      const agent = await createCodingAgent();
+      const agent = await createCodingAgent(this.modelName);
+      emit({ type: "model", name: this.modelName });
       emit({ type: "info", text: "任务开始执行..." });
       await runAgentForWeb({
         agent,

@@ -97,8 +97,16 @@ wss.on("connection", (ws) => {
 
   emit({
     type: "info",
-    text: `已连接。模型: ${Config.OPENAI_MODEL} | 工作空间: ${Config.WORKSPACE_DIR}`,
+    text: `已连接。模型: ${session.getModel().name} | 工作空间: ${Config.WORKSPACE_DIR}`,
   });
+  emit({ type: "workspace", path: session.state.workspace_dir });
+  // 推送模型列表 + 当前模型
+  emit({
+    type: "models",
+    models: session.getModels(),
+    current: session.modelName,
+  });
+  emit({ type: "model", name: session.modelName });
   if (!Config.OPENAI_API_KEY) {
     emit({ type: "info", text: `[WARN] OPENAI_API_KEY 未设置，请编辑: ${CONFIG_FILE}` });
   }
@@ -125,6 +133,20 @@ wss.on("connection", (ws) => {
       session.answer("[用户选择跳过]");
     } else if (type === "cancel") {
       session.cancel();
+    } else if (type === "set_model") {
+      const name = String(msg.name ?? "");
+      if (session.setModel(name)) {
+        emit({ type: "model", name: session.modelName });
+        emit({ type: "info", text: `已切换模型: ${session.modelName}` });
+      } else {
+        emit({ type: "info", text: `未找到模型: ${name}` });
+      }
+    } else if (type === "get_models") {
+      emit({
+        type: "models",
+        models: session.getModels(),
+        current: session.modelName,
+      });
     } else if (type === "restore") {
       const count = session.restore(String(msg.session_id ?? ""));
       emit({ type: "info", text: count > 0 ? `已恢复会话 (${count} 条消息)` : "会话不存在" });
@@ -132,7 +154,12 @@ wss.on("connection", (ws) => {
       const dir = String(msg.path ?? "");
       if (dir) {
         const ok = session.setWorkspace(dir);
-        emit({ type: "info", text: ok ? `已切换工作空间: ${session.state.workspace_dir}` : `切换失败: ${dir}` });
+        if (ok) {
+          emit({ type: "workspace", path: session.state.workspace_dir });
+          emit({ type: "info", text: `已切换工作空间: ${session.state.workspace_dir}` });
+        } else {
+          emit({ type: "info", text: `切换失败: ${dir}` });
+        }
       }
     }
   });

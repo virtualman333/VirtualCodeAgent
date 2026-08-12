@@ -34,14 +34,17 @@ import { getCurrentPlan, formatPlan } from "./tools/index.js";
 interface CliArgs {
   workspace: string | null;
   listWorkspaces: boolean;
+  model: string | null;
 }
 
 function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { workspace: null, listWorkspaces: false };
+  const args: CliArgs = { workspace: null, listWorkspaces: false, model: null };
   for (let i = 0; i < argv.length; i++) {
     const a = argv[i];
     if (a === "--list-workspaces") {
       args.listWorkspaces = true;
+    } else if (a === "-m" || a === "--model") {
+      args.model = argv[++i] ?? null;
     } else if (a === "-w" || a === "--workspace") {
       args.workspace = argv[++i] ?? null;
     } else if (!a.startsWith("-") && !args.workspace) {
@@ -68,6 +71,10 @@ function showConfigInfo(workspaceDir: string): void {
   print(`Workspace:   ${path.resolve(workspaceDir)}`);
   print(`Max Iter:    ${Config.MAX_TOOL_ITERATIONS}`);
   print(`Max Tokens:  ${Config.MAX_CONTEXT_TOKENS.toLocaleString()}`);
+  const models = Config.getModels();
+  if (models.length > 1) {
+    print(`可用模型:   ${models.map((m) => m.name).join(", ")}`);
+  }
 }
 
 function showHelp(verbose = false): void {
@@ -81,6 +88,7 @@ function showHelp(verbose = false): void {
   print(`  ${cyan("/todo")}       查看当前任务计划`);
   print(`  ${cyan("/config")}     显示配置`);
   print(`  ${cyan("/config set K V")}  修改配置`);
+  print(`  ${cyan("/model")}      查看/切换模型 (如 /model deepseek)`);
   print(`  ${cyan("/save")}       保存当前对话`);
   print(`  ${cyan("/load [序号]")} 恢复历史对话`);
   print(`  ${cyan("/history")}    列出历史会话`);
@@ -144,6 +152,7 @@ interface CommandState {
   workspaceDir: string;
   verbose: boolean;
   windowNo: number;
+  modelName: string;
 }
 
 async function handleCommand(
@@ -205,6 +214,30 @@ async function handleCommand(
         setConfigValue(parts[2], parts.slice(3).join(" "));
       } else {
         showConfigInfo(cs.workspaceDir);
+      }
+      break;
+    }
+    case "/model": {
+      const rest = userInput.replace(/^\/model\s*/, "").trim();
+      const models = Config.getModels();
+      if (!rest) {
+        print(`当前模型: ${cyan(cs.modelName)}`);
+        print(dim("可用模型:"));
+        models.forEach((m, i) => print(`  ${cyan(String(i + 1))}. ${m.name}  ${dim(m.model)}`));
+        print(dim("用法: /model <模型名> 或 /model <序号>"));
+      } else {
+        const idx = parseInt(rest, 10);
+        const target = !isNaN(idx) && idx >= 1 && idx <= models.length
+          ? models[idx - 1].name
+          : rest;
+        const cfg = Config.getModelConfig(target);
+        if (cfg && cfg.name === target) {
+          cs.modelName = cfg.name;
+          print(`${green("✓ 已切换模型:")} ${cyan(cfg.name)} ${dim(cfg.model)}`);
+        } else {
+          print(red(`未找到模型: ${rest}`));
+          print(dim(`可用: ${models.map((m) => m.name).join(", ")}`));
+        }
       }
       break;
     }
@@ -354,11 +387,11 @@ async function main(): Promise<void> {
   // 2. 选择工作空间
   const ws = await selectWorkspace(args.workspace);
 
-  // 3. 创建 Agent
+  // 3. 创建 Agent (按指定模型或默认模型)
   print(dim("正在初始化 Agent..."));
   let agent: CodingAgent;
   try {
-    agent = await createCodingAgent();
+    agent = await createCodingAgent(args.model);
   } catch (e) {
     print(red(`Agent 初始化失败: ${(e as Error).message}`));
     process.exit(1);
@@ -375,6 +408,7 @@ async function main(): Promise<void> {
     workspaceDir: restored.workspaceDir,
     verbose: false,
     windowNo: storage.listSessions().length + 1,
+    modelName: agent.modelConfig.name,
   };
 
   showBanner();
@@ -416,7 +450,13 @@ async function main(): Promise<void> {
       continue;
     }
 
-    // 运行 Agent
+    // 运行 Agent (每次按当前模型创建, 支持 /model 切换)
+    try {
+      agent = await createCodingAgent(cs.modelName);
+    } catch (e) {
+      print(red(`Agent 创建失败: ${(e as Error).message}`));
+      continue;
+    }
     await runAgent(agent, state, input, cs.verbose);
     // 每次交互后自动保存
     cs.sessionId = storage.autoSave(state, cs.sessionId ?? undefined);

@@ -5,15 +5,17 @@ import DOMPurify from "dompurify";
 import ToolCallCard from "./components/ToolCallCard.vue";
 import TodoPanel from "./components/TodoPanel.vue";
 import AskUserModal from "./components/AskUserModal.vue";
+import {
+  isVscodeEnv,
+  createVscodeTransport,
+  createWsTransport,
+  type Transport,
+  type ServerEvent,
+} from "./transport";
 
 // ============================================================
-// 类型定义 (WS 协议)
+// 类型定义 (Web 协议)
 // ============================================================
-
-interface ServerEvent {
-  type: string;
-  [key: string]: unknown;
-}
 
 interface ToolCallInfo {
   id: string;
@@ -47,6 +49,13 @@ interface AskPending {
   is_multi: boolean;
 }
 
+interface ModelOption {
+  name: string;
+  model: string;
+  base_url?: string;
+  api_key?: string;
+}
+
 // ============================================================
 // 状态
 // ============================================================
@@ -57,14 +66,18 @@ const running = ref(false);
 const connected = ref(false);
 const plan = ref("");
 const model = ref("—");
+const models = ref<ModelOption[]>([]);
 const workspace = ref("");
 const askPending = ref<AskPending | null>(null);
 const wsPath = ref("");
 const scrollRef = ref<HTMLElement | null>(null);
+const textareaRef = ref<HTMLTextAreaElement | null>(null);
 
-let ws: WebSocket | null = null;
+/** 是否运行在 VS Code Webview 中 (用于布局适配) */
+const isVscode = isVscodeEnv();
+
+let transport: Transport | null = null;
 let msgSeq = 0;
-let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
 const toolById = new Map<string, ToolCallInfo>();
 
 function push(m: Omit<Msg, "id">): void {
@@ -96,47 +109,36 @@ const lastUsage = computed<UsageInfo | null>(() => {
 });
 
 // ============================================================
-// WebSocket
+// 传输层 (WebSocket 浏览器 / VS Code Webview RPC)
 // ============================================================
 
-function connect(): void {
+function initTransport(): void {
+  if (isVscodeEnv()) {
+    // VS Code Webview 模式
+    transport = createVscodeTransport(handleEvent);
+    connected.value = true;
+    wsPath.value = "vscode-rpc";
+    push({ kind: "info", content: "已连接到 VCA (VS Code Webview)" });
+    return;
+  }
+
+  // 浏览器 WebSocket 模式
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   const url = `${protocol}//${location.host}/ws`;
   wsPath.value = url;
-  ws = new WebSocket(url);
-
-  ws.onopen = () => {
-    connected.value = true;
-    push({ kind: "info", content: "已连接服务" });
-  };
-
-  ws.onclose = () => {
-    connected.value = false;
-    running.value = false;
-    scheduleReconnect();
-  };
-
-  ws.onerror = () => {
-    ws?.close();
-  };
-
-  ws.onmessage = (ev) => {
-    let e: ServerEvent;
-    try {
-      e = JSON.parse(ev.data as string);
-    } catch {
-      return;
+  transport = createWsTransport(
+    url,
+    handleEvent,
+    (c) => {
+      connected.value = c;
+      if (!c) {
+        running.value = false;
+        push({ kind: "info", content: c ? "已连接服务" : "连接断开，重连中..." });
+      } else {
+        push({ kind: "info", content: "已连接服务" });
+      }
     }
-    handleEvent(e);
-  };
-}
-
-function scheduleReconnect(): void {
-  if (reconnectTimer) return;
-  reconnectTimer = setTimeout(() => {
-    reconnectTimer = null;
-    connect();
-  }, 3000);
+  );
 }
 
 function handleEvent(e: ServerEvent): void {
@@ -201,8 +203,37 @@ function handleEvent(e: ServerEvent): void {
         is_multi: Boolean(e.is_multi),
       };
       break;
+    case "workspace":
+      workspace.value = String(e.path ?? "");
+      break;
+    case "models":
+      if (Array.isArray(e.models)) {
+        models.value = (e.models as ModelOption[]).map((m) => ({
+          name: m.name ?? m.model,
+          model: m.model ?? m.name ?? "",
+          base_url: m.base_url,
+        }));
+      }
+      break;
+    case "model":
+      model.value = String(e.name ?? "");
+      break;
+    case "external": {
+      // 来自 VS Code 命令的外部输入 (选中代码等)
+      const content = String(e.content ?? "").trim();
+      if (content && !running.value) {
+        push({ kind: "user", content });
+        transport?.send({ type: "chat", content });
+      }
+      break;
+    }
   }
   scrollToBottom();
+}
+
+/** 在 VS Code 中打开文件 (工具调用结果中的路径) */
+function openFileInEditor(filePath: string, line?: number): void {
+  transport?.send({ type: "open_file", path: filePath, line: line ?? 0 });
 }
 
 // ============================================================
@@ -211,33 +242,40 @@ function handleEvent(e: ServerEvent): void {
 
 function send(): void {
   const text = input.value.trim();
-  if (!text || !ws || ws.readyState !== WebSocket.OPEN || running.value) return;
+  if (!text || !transport || !connected.value || running.value) return;
   push({ kind: "user", content: text });
   input.value = "";
-  ws.send(JSON.stringify({ type: "chat", content: text }));
+  transport.send({ type: "chat", content: text });
 }
 
 function cancel(): void {
-  ws?.send(JSON.stringify({ type: "cancel" }));
+  transport?.send({ type: "cancel" });
 }
 
 function onAskSelect(v: string): void {
   askPending.value = null;
-  ws?.send(JSON.stringify({ type: "answer_option", content: v }));
+  transport?.send({ type: "answer_option", content: v });
 }
 function onAskCustom(v: string): void {
   askPending.value = null;
-  ws?.send(JSON.stringify({ type: "answer", content: v }));
+  transport?.send({ type: "answer", content: v });
 }
 function onAskSkip(): void {
   askPending.value = null;
-  ws?.send(JSON.stringify({ type: "skip_question" }));
+  transport?.send({ type: "skip_question" });
 }
 
 function onWorkspaceChange(ev: Event): void {
   const val = (ev.target as HTMLInputElement).value.trim();
   if (!val) return;
-  ws?.send(JSON.stringify({ type: "workspace", path: val }));
+  transport?.send({ type: "workspace", path: val });
+}
+
+/** 切换模型 */
+function switchModel(ev: Event): void {
+  const name = (ev.target as HTMLSelectElement).value;
+  if (!name || name === model.value) return;
+  transport?.send({ type: "set_model", name });
 }
 
 function formatDuration(ms: number): string {
@@ -245,18 +283,45 @@ function formatDuration(ms: number): string {
   return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
+/** 自动增高 textarea (内容超过固定高度后随行数增长) */
+function autoResize(): void {
+  const el = textareaRef.value;
+  if (!el) return;
+  el.style.height = "auto";
+  el.style.height = `${Math.min(el.scrollHeight + 2, 180)}px`;
+}
+
+/** 在光标处插入换行 (Shift+Enter) */
+function insertNewline(): void {
+  const el = textareaRef.value;
+  if (!el) return;
+  const start = el.selectionStart;
+  const end = el.selectionEnd;
+  input.value = input.value.slice(0, start) + "\n" + input.value.slice(end);
+  // 恢复光标位置 (nextTick 后生效)
+  requestAnimationFrame(() => {
+    el.selectionStart = el.selectionEnd = start + 1;
+  });
+  autoResize();
+}
+
+function onSend(): void {
+  send();
+  requestAnimationFrame(() => textareaRef.value?.focus());
+}
+
 onMounted(() => {
-  connect();
+  initTransport();
+  requestAnimationFrame(() => textareaRef.value?.focus());
 });
 
 onUnmounted(() => {
-  if (reconnectTimer) clearTimeout(reconnectTimer);
-  ws?.close();
+  transport?.close();
 });
 </script>
 
 <template>
-  <div class="app">
+  <div class="app" :class="{ 'is-vscode': isVscode }">
     <!-- 顶栏 -->
     <header class="topbar">
       <span class="logo">⚡ VCA</span>
@@ -264,7 +329,7 @@ onUnmounted(() => {
         <span class="dot" :class="{ on: connected }" />
         {{ connected ? "已连接" : "连接中..." }}
       </span>
-      <span class="model">{{ model }}</span>
+      <span class="model" v-if="!isVscode">{{ model }}</span>
     </header>
 
     <div class="main">
@@ -293,6 +358,8 @@ onUnmounted(() => {
                 :args="m.tool.args"
                 :result="m.tool.result"
                 :running="m.tool.running"
+                :show-open="isVscode"
+                @open-file="openFileInEditor"
               />
             </div>
 
@@ -316,15 +383,29 @@ onUnmounted(() => {
 
         <!-- 输入区 -->
         <div class="input-area">
+          <div class="model-bar">
+            <label>🤖 模型</label>
+            <select
+              class="model-select"
+              :value="model"
+              :disabled="running"
+              @change="switchModel"
+            >
+              <option v-for="m in models" :key="m.name" :value="m.name">{{ m.name }}</option>
+            </select>
+            <span class="model-base" v-if="!isVscode">{{ models.find(m => m.name === model)?.base_url || '' }}</span>
+          </div>
           <textarea
+            ref="textareaRef"
             v-model="input"
-            placeholder="输入编程任务，回车发送 (Shift+Enter 换行)..."
+            placeholder="输入编程任务，Enter 发送 / Shift+Enter 换行..."
             rows="1"
-            @keydown.enter.exact.prevent="send"
-            @keydown.enter.shift="() => {}"
+            @input="autoResize"
+            @keydown.enter.exact.prevent="onSend"
+            @keydown.enter.shift.exact.prevent="insertNewline"
           />
           <button v-if="running" class="btn stop" @click="cancel">⏹ 停止</button>
-          <button class="btn" :disabled="running || !connected" @click="send">发送</button>
+          <button class="btn" :disabled="running || !connected" @click="onSend">发送</button>
         </div>
       </div>
 
@@ -346,7 +427,8 @@ onUnmounted(() => {
           <div style="font-size: 12px; color: var(--text-dim); line-height: 1.8">
             <div>连接: {{ wsPath }}</div>
             <div>模型: {{ model }}</div>
-            <div>协议: WS 流式事件</div>
+            <div v-if="models.length > 1">可选: {{ models.map(m => m.name).join(", ") }}</div>
+            <div>协议: 流式事件</div>
           </div>
         </div>
       </aside>

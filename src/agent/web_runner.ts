@@ -22,7 +22,7 @@ import type { AgentState, PendingQuestion } from "./state.js";
 import type { CodingAgent } from "./graph.js";
 
 export interface WebEvent {
-  type: "thinking" | "tool_call" | "tool_result" | "plan" | "final" | "ask_user" | "usage" | "info" | "running";
+  type: "thinking" | "tool_call" | "tool_result" | "plan" | "final" | "ask_user" | "usage" | "info" | "running" | "workspace" | "external" | "model" | "models";
   [key: string]: unknown;
 }
 

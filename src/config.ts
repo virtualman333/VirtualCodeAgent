@@ -20,20 +20,33 @@ export const MCP_CONFIG_FILE = path.join(VCA_DIR, "mcp.json");
 // 配置类型与默认值
 // ============================================================
 
+/** 单个模型配置 */
+export interface ModelConfig {
+  name: string;
+  model: string;
+  base_url?: string;
+  api_key?: string;
+}
+
 export interface VcaConfig {
   OPENAI_API_KEY: string;
   OPENAI_BASE_URL: string;
   OPENAI_MODEL: string;
+  /** 默认使用哪个模型 (MODELS 中的 name，或 OPENAI_MODEL) */
+  DEFAULT_MODEL?: string;
+  /** 多模型列表 (可省略 base_url/api_key，继承全局默认) */
+  MODELS?: ModelConfig[];
   WORKSPACE_DIR: string;
   MAX_TOOL_ITERATIONS: number;
   MAX_CONTEXT_TOKENS: number;
-  [key: string]: string | number | boolean;
+  [key: string]: unknown;
 }
 
 export const DEFAULT_CONFIG: VcaConfig = {
   OPENAI_API_KEY: "",
   OPENAI_BASE_URL: "https://api.openai.com/v1",
   OPENAI_MODEL: "gpt-4o-mini",
+  DEFAULT_MODEL: "gpt-4o-mini",
   WORKSPACE_DIR: "~/.vca/workspace",
   MAX_TOOL_ITERATIONS: 10,
   MAX_CONTEXT_TOKENS: 100000,
@@ -43,6 +56,7 @@ export const EDITABLE_KEYS = new Set([
   "OPENAI_API_KEY",
   "OPENAI_BASE_URL",
   "OPENAI_MODEL",
+  "DEFAULT_MODEL",
   "WORKSPACE_DIR",
   "MAX_TOOL_ITERATIONS",
   "MAX_CONTEXT_TOKENS",
@@ -172,13 +186,57 @@ export const Config = {
     return _config[key] ?? def;
   },
 
-  set(key: string, value: string | number): void {
+  set(key: string, value: string | number | ModelConfig[]): void {
     _config[key] = value;
     saveFile(_config);
   },
 
+  // ---------- 多模型 ----------
+
+  /** 模型配置列表。优先用 MODELS 数组，否则回退到单模型配置 */
+  getModels(): ModelConfig[] {
+    const models = _config.MODELS;
+    if (Array.isArray(models) && models.length > 0) {
+      return models.map((m, i) => ({
+        name: m.name || m.model || `model_${i + 1}`,
+        model: m.model || m.name || "gpt-4o-mini",
+        base_url: m.base_url || this.OPENAI_BASE_URL,
+        api_key: m.api_key || this.OPENAI_API_KEY,
+      }));
+    }
+    return [
+      {
+        name: this.OPENAI_MODEL,
+        model: this.OPENAI_MODEL,
+        base_url: this.OPENAI_BASE_URL,
+        api_key: this.OPENAI_API_KEY,
+      },
+    ];
+  },
+
+  /** 默认模型名 */
+  getDefaultModelName(): string {
+    return String(_config.DEFAULT_MODEL ?? this.OPENAI_MODEL);
+  },
+
+  /** 按名称取模型配置 (不存在时回退默认模型) */
+  getModelConfig(name?: string | null): ModelConfig {
+    const models = this.getModels();
+    if (!name) {
+      const defName = this.getDefaultModelName();
+      return models.find((m) => m.name === defName) ?? models[0];
+    }
+    return models.find((m) => m.name === name) ?? models[0];
+  },
+
+  /** 判断 API Key 是否有效 (任一模型有 key 即可) */
+  hasApiKey(): boolean {
+    if (this.OPENAI_API_KEY) return true;
+    return this.getModels().some((m) => m.api_key);
+  },
+
   validate(): boolean {
-    if (!this.OPENAI_API_KEY) {
+    if (!this.hasApiKey()) {
       console.log("[WARN] OPENAI_API_KEY 未设置");
       console.log(`[WARN] 请编辑配置文件: ${CONFIG_FILE}`);
       return false;

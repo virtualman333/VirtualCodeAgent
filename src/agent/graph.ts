@@ -22,7 +22,7 @@ import {
 
 import { StateAnnotation, type AgentState, type LlmUsage } from "./state.js";
 import { buildSystemPrompt } from "./prompts.js";
-import { Config } from "../config.js";
+import { Config, type ModelConfig } from "../config.js";
 import { ALL_TOOLS, EXECUTABLE_TOOLS } from "../tools/index.js";
 import { mcpManager } from "../mcp/manager.js";
 import type { StructuredToolInterface } from "@langchain/core/tools";
@@ -253,21 +253,25 @@ export class CodingAgent {
   workspace_dir = "";
   allTools: StructuredToolInterface[];
   mcpTools: StructuredToolInterface[];
+  modelConfig: ModelConfig;
 
-  constructor(mcpTools: StructuredToolInterface[] = []) {
+  constructor(modelConfig: ModelConfig, mcpTools: StructuredToolInterface[] = []) {
+    this.modelConfig = modelConfig;
     Config.validate();
 
+    const { model, base_url, api_key } = modelConfig;
+
     this.llm = new ChatOpenAI({
-      model: Config.OPENAI_MODEL,
-      apiKey: Config.OPENAI_API_KEY,
-      configuration: { baseURL: Config.OPENAI_BASE_URL },
+      model,
+      apiKey: api_key,
+      configuration: { baseURL: base_url },
       temperature: 0.2,
     });
 
     this.summaryLlm = new ChatOpenAI({
-      model: Config.OPENAI_MODEL,
-      apiKey: Config.OPENAI_API_KEY,
-      configuration: { baseURL: Config.OPENAI_BASE_URL },
+      model,
+      apiKey: api_key,
+      configuration: { baseURL: base_url },
       temperature: 0.0,
     });
 
@@ -458,8 +462,9 @@ async function connectMcpOnce(): Promise<StructuredToolInterface[]> {
   return connectingMcp;
 }
 
-export async function createCodingAgent(): Promise<CodingAgent> {
+export async function createCodingAgent(modelName?: string | null): Promise<CodingAgent> {
   Config.validate();
   const mcpTools = await connectMcpOnce();
-  return new CodingAgent(mcpTools);
+  const modelConfig = Config.getModelConfig(modelName ?? null);
+  return new CodingAgent(modelConfig, mcpTools);
 }
