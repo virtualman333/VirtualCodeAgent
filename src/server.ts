@@ -90,26 +90,45 @@ const server = http.createServer((req, res) => {
 const wss = new WebSocketServer({ server, path: "/ws" });
 
 wss.on("connection", (ws) => {
-  const session = new AgentSession(Config.WORKSPACE_DIR);
-  const emit = (e: WebEvent): void => {
-    if (ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(e));
+  // 每个连接持有多个独立会话 (多 tab 并行)
+  const sessions = new Map<string, AgentSession>();
+
+  const emitTo = (sid: string) => (e: WebEvent): void => {
+    if (ws.readyState === WebSocket.OPEN) {
+      ws.send(JSON.stringify({ ...e, sessionId: sid }));
+    }
   };
 
-  emit({
+  const createSession = (id?: string): AgentSession => {
+    const s = new AgentSession(Config.WORKSPACE_DIR, [], id);
+    sessions.set(s.id, s);
+    return s;
+  };
+
+  const getSession = (msg: Record<string, unknown>): AgentSession | null => {
+    const sid = String(msg.session_id ?? "");
+    return sessions.get(sid) ?? null;
+  };
+
+  // 全局信息 (任一 session 均可)
+  const emitGlobalInfo = (): void => {
+    if (!Config.OPENAI_API_KEY) {
+      emitTo("")({ type: "info", text: `[WARN] OPENAI_API_KEY 未设置，请编辑: ${CONFIG_FILE}` });
+    }
+  };
+
+  // 连接即创建首个会话 (默认 tab)
+  const first = createSession();
+  emitTo(first.id)({
     type: "info",
-    text: `已连接。模型: ${session.getModel().name} | 工作空间: ${Config.WORKSPACE_DIR}`,
+    text: `已连接。模型: ${first.getModel().name} | 工作空间: ${Config.WORKSPACE_DIR}`,
   });
-  emit({ type: "workspace", path: session.state.workspace_dir });
-  // 推送模型列表 + 当前模型
-  emit({
-    type: "models",
-    models: session.getModels(),
-    current: session.modelName,
-  });
-  emit({ type: "model", name: session.modelName });
-  if (!Config.OPENAI_API_KEY) {
-    emit({ type: "info", text: `[WARN] OPENAI_API_KEY 未设置，请编辑: ${CONFIG_FILE}` });
-  }
+  emitTo(first.id)({ type: "workspace", path: first.state.workspace_dir });
+  emitTo(first.id)({ type: "models", models: first.getModels(), current: first.modelName });
+  emitTo(first.id)({ type: "model", name: first.modelName });
+  emitTo(first.id)({ type: "context", ...first.getContextInfo() });
+  emitTo(first.id)({ type: "session_id", id: first.id });
+  emitGlobalInfo();
 
   ws.on("message", async (raw) => {
     let msg: Record<string, unknown>;
@@ -120,9 +139,36 @@ wss.on("connection", (ws) => {
     }
     const type = String(msg.type ?? "");
 
+    // ---- 会话管理 ----
+    if (type === "new_session") {
+      const s = createSession();
+      emitTo(s.id)({ type: "session_created", id: s.id, title: s.title });
+      emitTo(s.id)({ type: "workspace", path: s.state.workspace_dir });
+      emitTo(s.id)({ type: "models", models: s.getModels(), current: s.modelName });
+      emitTo(s.id)({ type: "model", name: s.modelName });
+      emitTo(s.id)({ type: "context", ...s.getContextInfo() });
+      return;
+    }
+    if (type === "close_session") {
+      const s = getSession(msg);
+      if (s) {
+        s.cancel();
+        sessions.delete(s.id);
+        emitTo(s.id)({ type: "session_closed", id: s.id });
+      }
+      return;
+    }
+
+    const session = getSession(msg);
+    if (!session) return; // 无效会话 ID 忽略
+    const emit = emitTo(session.id);
+
     if (type === "chat") {
       const content = String(msg.content ?? "").trim();
-      if (content) await session.chat(content, emit);
+      const images = Array.isArray(msg.images)
+        ? (msg.images as unknown[]).filter((x): x is string => typeof x === "string")
+        : [];
+      if (content || images.length > 0) await session.chat(content, images, emit);
     } else if (type === "answer") {
       const content = String(msg.content ?? "").trim();
       session.answer(content ? `用户回答: ${content}` : "[用户选择跳过]");
@@ -142,14 +188,21 @@ wss.on("connection", (ws) => {
         emit({ type: "info", text: `未找到模型: ${name}` });
       }
     } else if (type === "get_models") {
-      emit({
-        type: "models",
-        models: session.getModels(),
-        current: session.modelName,
-      });
-    } else if (type === "restore") {
-      const count = session.restore(String(msg.session_id ?? ""));
-      emit({ type: "info", text: count > 0 ? `已恢复会话 (${count} 条消息)` : "会话不存在" });
+      emit({ type: "models", models: session.getModels(), current: session.modelName });
+    } else if (type === "get_context") {
+      emit({ type: "context", ...session.getContextInfo() });
+    } else if (type === "enhance") {
+      const input = String(msg.input ?? "").trim();
+      if (!input) {
+        emit({ type: "enhance_result", error: "输入为空" });
+      } else {
+        try {
+          const enhanced = await session.enhanceInput(input);
+          emit({ type: "enhance_result", text: enhanced });
+        } catch (e) {
+          emit({ type: "enhance_result", error: (e as Error).message });
+        }
+      }
     } else if (type === "workspace") {
       const dir = String(msg.path ?? "");
       if (dir) {
@@ -165,7 +218,8 @@ wss.on("connection", (ws) => {
   });
 
   ws.on("close", () => {
-    session.cancel();
+    for (const s of sessions.values()) s.cancel();
+    sessions.clear();
   });
 });
 

@@ -1,18 +1,27 @@
+/* ============================================================
+   CodeBuddy 风格浅色主题
+   ============================================================ */
 :root {
-  --bg: #0f1117;
-  --bg-panel: #161a22;
-  --bg-hover: #1d2230;
-  --bg-input: #1a1f2c;
-  --border: #262d3d;
-  --text: #dde3ee;
+  --bg: #f7f8fa;
+  --bg-panel: #ffffff;
+  --bg-hover: #f1f3f6;
+  --bg-input: #ffffff;
+  --border: #e6e8ec;
+  --border-strong: #d4d8df;
+  --text: #1f2328;
+  --text-2: #4a525c;
   --text-dim: #8b94a7;
-  --accent: #4c9aff;
-  --accent-2: #6ee7b7;
-  --yellow: #e7c26b;
-  --red: #f87171;
-  --magenta: #c084fc;
-  --cyan: #67e8f9;
+  --accent: #4c6ef5;
+  --accent-2: #1d4ed8;
+  --accent-bg: #eef2ff;
+  --yellow: #d97706;
+  --red: #dc2626;
+  --magenta: #9333ea;
+  --cyan: #0891b2;
+  --green: #059669;
   --radius: 10px;
+  --shadow-sm: 0 1px 2px rgba(15, 23, 42, 0.04);
+  --shadow-md: 0 4px 12px rgba(15, 23, 42, 0.08);
   font-size: 14px;
 }
 
@@ -21,31 +30,27 @@
   padding: 0;
   box-sizing: border-box;
 }
-
 html,
 body,
 #app {
   height: 100%;
 }
-
 body {
   font-family: "Segoe UI", "Microsoft YaHei", system-ui, -apple-system, sans-serif;
   background: var(--bg);
   color: var(--text);
   overflow: hidden;
 }
-
 button {
   font-family: inherit;
   cursor: pointer;
 }
-
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #2c3446;
+  background: #d4d8df;
   border-radius: 4px;
 }
 ::-webkit-scrollbar-track {
@@ -61,45 +66,111 @@ button {
   height: 100%;
 }
 
-.topbar {
-  display: flex;
-  align-items: center;
-  gap: 16px;
-  padding: 10px 20px;
-  background: var(--bg-panel);
-  border-bottom: 1px solid var(--border);
-  flex-shrink: 0;
-}
-.topbar .logo {
-  font-weight: 700;
-  font-size: 15px;
-  color: var(--accent);
-  letter-spacing: 0.5px;
-}
-.topbar .conn {
-  font-size: 12px;
-  color: var(--text-dim);
+/* 顶部 tab (多会话窗口) */
+.tab-bar {
   display: flex;
   align-items: center;
   gap: 6px;
+  padding: 6px 12px;
+  background: var(--bg-panel);
+  border-bottom: 1px solid var(--border);
+  height: 36px;
+  flex-shrink: 0;
+  overflow-x: auto;
+  overflow-y: hidden;
+  scrollbar-width: none;
 }
-.topbar .dot {
-  width: 8px;
-  height: 8px;
-  border-radius: 50%;
-  background: var(--red);
+.tab-bar::-webkit-scrollbar {
+  display: none;
 }
-.topbar .dot.on {
-  background: var(--accent-2);
-}
-.topbar .model {
-  margin-left: auto;
-  font-size: 12px;
-  color: var(--text-dim);
-  background: var(--bg-input);
+.tab {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  height: 26px;
+  padding: 0 6px 0 10px;
+  background: var(--bg-hover);
   border: 1px solid var(--border);
-  padding: 3px 10px;
-  border-radius: 20px;
+  color: var(--text-2);
+  font-size: 12px;
+  font-weight: 500;
+  border-radius: 6px;
+  white-space: nowrap;
+  cursor: pointer;
+  max-width: 160px;
+  flex-shrink: 0;
+  user-select: none;
+  transition: all 0.15s;
+}
+.tab:hover {
+  background: var(--bg);
+}
+.tab.active {
+  background: var(--accent-bg);
+  border-color: var(--accent);
+  color: var(--accent-2);
+}
+.tab-title {
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tab-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1s infinite;
+  flex-shrink: 0;
+}
+.tab-close {
+  margin-left: 2px;
+  opacity: 0.5;
+  cursor: pointer;
+  font-size: 14px;
+  line-height: 1;
+  flex-shrink: 0;
+  padding: 0 2px;
+}
+.tab-close:hover {
+  opacity: 1;
+  color: var(--red);
+}
+.tab-add {
+  background: transparent;
+  border-style: dashed;
+  color: var(--text-dim);
+  padding: 0 10px;
+  flex-shrink: 0;
+}
+.tab-add:hover {
+  color: var(--accent);
+  border-color: var(--accent);
+  background: var(--accent-bg);
+}
+.conn-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 11px;
+  color: var(--text-dim);
+  white-space: nowrap;
+}
+.tab-actions {
+  margin-left: auto;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.ghost-btn {
+  background: transparent;
+  border: 1px solid var(--border-strong);
+  color: var(--text-2);
+  font-size: 12px;
+  padding: 4px 12px;
+  border-radius: 6px;
+}
+.ghost-btn:hover {
+  background: var(--bg-hover);
 }
 
 .main {
@@ -117,97 +188,180 @@ button {
   flex-direction: column;
   min-width: 0;
 }
-
 .messages {
   flex: 1;
   overflow-y: auto;
-  padding: 20px 24px;
+  padding: 16px 24px;
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 10px;
+}
+.app.is-vscode .messages {
+  padding: 10px 12px;
+  gap: 8px;
 }
 
-.msg {
-  max-width: 92%;
-  line-height: 1.6;
+/* 空状态 */
+.empty-state {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  padding: 60px 20px;
+  text-align: center;
 }
-.msg.user {
-  align-self: flex-end;
-  background: linear-gradient(135deg, #2a5cff, #3d7bff);
+.empty-avatar {
+  width: 56px;
+  height: 56px;
+  background: linear-gradient(135deg, var(--accent), var(--accent-2));
+  border-radius: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  margin-bottom: 10px;
+  box-shadow: 0 8px 24px rgba(76, 110, 245, 0.3);
+}
+.logo-mark {
+  font-size: 28px;
   color: #fff;
-  padding: 9px 14px;
-  border-radius: 14px 14px 4px 14px;
+}
+.empty-name {
+  font-size: 20px;
+  font-weight: 600;
+  color: var(--text);
+}
+.empty-sub {
+  font-size: 13px;
+  color: var(--text-dim);
+  margin: 6px 0 18px;
+}
+.empty-tips {
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 2;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  padding: 12px 18px;
+}
+
+/* ============================================================
+   消息行 (无头像, 高信息密度)
+   ============================================================ */
+.msg {
+  width: 100%;
+}
+.user-msg {
+  display: flex;
+  justify-content: flex-end;
+}
+.agent-msg {
+  display: block;
+}
+.user-body,
+.agent-body {
+  max-width: 100%;
+  min-width: 0;
+}
+.user-text {
+  display: inline-block;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 12px;
+  line-height: 1.55;
   white-space: pre-wrap;
   word-break: break-word;
+  color: var(--text);
+  box-shadow: var(--shadow-sm);
+  font-size: 13px;
 }
-.msg.thinking {
-  align-self: flex-start;
-  width: 100%;
+.user-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 6px;
 }
-.msg.info {
-  align-self: center;
-  font-size: 12px;
-  color: var(--text-dim);
-  background: var(--bg-panel);
+.user-images img {
+  max-width: 180px;
+  max-height: 180px;
+  border-radius: 8px;
   border: 1px solid var(--border);
-  padding: 4px 14px;
-  border-radius: 20px;
+  object-fit: cover;
 }
-.msg.final {
-  align-self: flex-start;
-  width: 100%;
-  background: var(--bg-panel);
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--accent-2);
-  border-radius: var(--radius);
-  padding: 14px 18px;
-}
-.msg.tool {
-  align-self: flex-start;
-  width: 100%;
-}
-.msg.usage {
-  align-self: flex-end;
-  font-size: 12px;
-  color: var(--cyan);
+
+/* Agent 名称 (CodeBuddy 风格) */
+.final-name {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--accent-2);
+  margin-bottom: 3px;
 }
 
 /* 思考卡片 */
 .think-card {
   background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-left: 3px solid var(--yellow);
   border-radius: var(--radius);
+  margin-bottom: 8px;
   overflow: hidden;
 }
 .think-head {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-2);
+  padding: 8px 14px;
+  cursor: pointer;
+  list-style: none;
   display: flex;
   align-items: center;
-  gap: 8px;
-  padding: 8px 14px;
-  font-size: 12px;
-  color: var(--yellow);
-  font-weight: 600;
-  cursor: pointer;
-  user-select: none;
+  gap: 6px;
+  background: var(--bg-hover);
 }
-.think-collapsed {
-  font-size: 12px;
+.think-head::-webkit-details-marker {
+  display: none;
+}
+.think-head::before {
+  content: "▶";
+  font-size: 9px;
+  transition: transform 0.15s;
   color: var(--text-dim);
-  font-style: italic;
-  overflow: hidden;
-  white-space: nowrap;
-  text-overflow: ellipsis;
-  max-width: 60%;
+}
+.think-card[open] .think-head::before {
+  transform: rotate(90deg);
 }
 .think-body {
   padding: 10px 14px;
-  border-top: 1px solid var(--border);
+  font-size: 12px;
+  color: var(--text-2);
+  line-height: 1.6;
   white-space: pre-wrap;
-  font-size: 13px;
-  color: var(--text-dim);
-  max-height: 320px;
+  max-height: 240px;
   overflow-y: auto;
+  border-top: 1px solid var(--border);
+}
+
+/* 提示/汇总 */
+.msg.info {
+  align-self: center;
+  font-size: 12px;
+  color: var(--text-dim);
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  padding: 4px 12px;
+  border-radius: 14px;
+}
+.msg.usage {
+  align-self: flex-end;
+  font-size: 12px;
+  color: var(--text-2);
+}
+.usage-bar {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 12px;
 }
 
 /* ============================================================
@@ -218,47 +372,37 @@ button {
   flex-shrink: 0;
   background: var(--bg-panel);
   border-left: 1px solid var(--border);
-  padding: 16px;
+  padding: 14px;
   display: flex;
   flex-direction: column;
-  gap: 14px;
+  gap: 12px;
   overflow-y: auto;
 }
-.side .panel {
+.app.is-vscode .side {
+  display: none;
+}
+.panel {
   background: var(--bg);
   border: 1px solid var(--border);
   border-radius: var(--radius);
   padding: 12px 14px;
 }
-.side .panel h3 {
-  font-size: 13px;
+.panel h3 {
+  font-size: 12px;
   color: var(--text-dim);
-  margin-bottom: 10px;
+  margin-bottom: 8px;
   font-weight: 600;
-}
-.todo-steps {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.todo-step {
-  font-size: 13px;
-  color: var(--text);
-  line-height: 1.5;
-  padding: 6px 8px;
-  background: var(--bg-panel);
-  border-radius: 6px;
-  border: 1px solid var(--border);
 }
 .workspace-box {
   font-size: 12px;
-  color: var(--text-dim);
+  color: var(--text-2);
   word-break: break-all;
+  line-height: 1.5;
 }
 .workspace-box input {
   width: 100%;
-  margin-top: 8px;
-  background: var(--bg-input);
+  margin-top: 6px;
+  background: var(--bg-panel);
   border: 1px solid var(--border);
   border-radius: 6px;
   padding: 6px 10px;
@@ -269,163 +413,269 @@ button {
   outline: none;
   border-color: var(--accent);
 }
+.info-line {
+  font-size: 12px;
+  color: var(--text-2);
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  line-height: 1.6;
+}
+.info-line.dim {
+  color: var(--text-dim);
+}
+.dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--border-strong);
+  display: inline-block;
+}
+.dot.on {
+  background: var(--green);
+}
+
+/* ============================================================
+   任务清单列表 (消息区与输入区之间)
+   ============================================================ */
+.plan-slot {
+  flex-shrink: 0;
+  padding: 0 32px 4px;
+  max-height: 30vh;
+  overflow-y: auto;
+}
+.app.is-vscode .plan-slot {
+  padding: 0 14px 4px;
+}
 
 /* ============================================================
    输入区
    ============================================================ */
 .input-area {
   flex-shrink: 0;
-  padding: 12px 24px 16px;
-  background: var(--bg-panel);
+  padding: 12px 32px 14px;
+  background: var(--bg);
   border-top: 1px solid var(--border);
   display: flex;
-  gap: 10px;
-  align-items: flex-end;
+  flex-direction: column;
+  gap: 8px;
 }
-.input-area textarea {
-  flex: 1;
-  resize: vertical; /* 可拖拽调节高度 */
-  background: var(--bg-input);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  color: var(--text);
-  padding: 10px 14px;
-  font-size: 14px;
-  line-height: 1.6;
-  min-height: 64px; /* 更高的输入框 */
-  max-height: 180px;
-  font-family: inherit;
-}
-.input-area textarea::-webkit-resizer {
-  background: var(--border);
-  border-radius: 0 0 var(--radius) 0;
+.app.is-vscode .input-area {
+  padding: 8px 14px 10px;
 }
 
-/* 模型切换条 */
-.model-bar {
+/* 已附加图片缩略图 */
+.attached-images {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-bottom: 4px;
+}
+.thumb {
+  position: relative;
+  width: 60px;
+  height: 60px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+}
+.thumb img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  display: block;
+}
+.thumb-remove {
+  position: absolute;
+  top: 2px;
+  right: 2px;
+  width: 16px;
+  height: 16px;
+  border: none;
+  background: rgba(0, 0, 0, 0.6);
+  color: #fff;
+  border-radius: 50%;
+  font-size: 12px;
+  line-height: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0;
+}
+
+/* 模型条 + 任务清单 */
+.input-tools {
   display: flex;
   align-items: center;
   gap: 8px;
   flex-wrap: wrap;
 }
-.model-bar label {
+.tool-icon {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 4px 10px;
   font-size: 12px;
-  color: var(--text-dim);
+  color: var(--text-2);
+  height: 24px;
+}
+.tool-icon .dot-pulse {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--accent);
+  animation: pulse 1s infinite;
+}
+.tool-icon .dot-idle {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+}
+@keyframes pulse {
+  50% {
+    opacity: 0.4;
+  }
+}
+.spacer {
+  flex: 1;
 }
 .model-select {
-  background: var(--bg-input);
+  background: var(--bg-panel);
   border: 1px solid var(--border);
-  border-radius: 6px;
+  border-radius: 8px;
   color: var(--text);
-  padding: 3px 8px;
+  padding: 3px 10px;
   font-size: 12px;
-  max-width: 180px;
+  height: 24px;
   cursor: pointer;
-}
-.model-select:disabled {
-  opacity: 0.5;
-  cursor: not-allowed;
 }
 .model-select:focus {
   outline: none;
   border-color: var(--accent);
 }
-.model-base {
-  font-size: 11px;
-  color: var(--text-dim);
-  overflow: hidden;
-  text-overflow: ellipsis;
-  white-space: nowrap;
-  max-width: 200px;
-}
-.input-area textarea:focus {
+
+/* 文本输入框 (默认更高) */
+.chat-input {
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  color: var(--text);
+  padding: 14px 16px;
+  font-size: 14px;
+  line-height: 1.7;
+  min-height: 72px;
+  max-height: 220px;
+  font-family: inherit;
+  resize: vertical;
   outline: none;
+  transition: border-color 0.15s;
+}
+.chat-input:focus {
   border-color: var(--accent);
 }
-.input-area .btn {
-  padding: 10px 20px;
-  border-radius: var(--radius);
-  border: none;
-  font-size: 14px;
-  font-weight: 600;
+.app.is-vscode .chat-input {
+  min-height: 64px;
+  font-size: 13px;
+}
+
+/* 上下文窗口 */
+.ctx-wrap {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.ctx-bar {
+  width: 120px;
+  height: 5px;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 3px;
+  overflow: hidden;
+}
+.ctx-fill {
+  height: 100%;
+  border-radius: 3px;
+  transition: width 0.4s;
+}
+.ctx-text {
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+/* 增强提示词 */
+.spin-anim {
+  display: inline-block;
+  animation: spin 1.2s linear infinite;
+}
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+.send-btn {
   background: var(--accent);
-  color: #fff;
-  transition: opacity 0.15s;
+  color: #fff !important;
+  border-radius: 8px;
 }
-.input-area .btn:hover {
-  opacity: 0.9;
+.send-btn:hover:not(:disabled) {
+  background: var(--accent-2);
+  color: #fff !important;
 }
-.input-area .btn:disabled {
+.send-btn:disabled {
+  background: var(--bg-hover);
+  color: var(--text-dim) !important;
+  opacity: 1;
+}
+
+/* 工具栏 */
+.input-toolbar {
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+.toolbar-left {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex: 1;
+}
+.toolbar-right {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.t-icon {
+  width: 28px;
+  height: 28px;
+  border: none;
+  background: transparent;
+  border-radius: 6px;
+  color: var(--text-2);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+.t-icon:hover {
+  background: var(--bg-hover);
+  color: var(--text);
+}
+.t-icon:disabled {
   opacity: 0.4;
   cursor: not-allowed;
 }
-.input-area .btn.stop {
-  background: var(--red);
-}
-
-/* ============================================================
-   VS Code 侧边栏适配
-   ============================================================ */
-
-/* 窄屏 (< 900px): 隐藏右侧面板，聊天区占满 */
-@media (max-width: 900px) {
-  .side {
-    display: none;
-  }
-  .messages {
-    padding: 14px;
-  }
-  .msg {
-    max-width: 100%;
-  }
-  .msg.user {
-    max-width: 100%;
-  }
-  .msg.final {
-    padding: 12px 14px;
-  }
-}
-
-/* VS Code Webview 环境: 更紧凑的边距，充分利用窄侧边栏 */
-.app.is-vscode {
-  font-size: 13px;
-}
-.app.is-vscode .topbar {
-  padding: 6px 12px;
-  gap: 10px;
-}
-.app.is-vscode .topbar .logo {
-  font-size: 13px;
-}
-.app.is-vscode .conn {
-  font-size: 11px;
-}
-.app.is-vscode .messages {
-  padding: 12px 14px;
-  gap: 10px;
-}
-.app.is-vscode .input-area {
-  padding: 8px 14px 12px;
-  gap: 8px;
-}
-.app.is-vscode .input-area textarea {
-  min-height: 56px;
-  font-size: 13px;
-  padding: 8px 12px;
-}
-.app.is-vscode .input-area .btn {
-  padding: 8px 14px;
-  font-size: 13px;
-}
-.app.is-vscode .think-head {
-  padding: 6px 10px;
-}
-.app.is-vscode .think-body {
-  padding: 8px 10px;
-  font-size: 12.5px;
-}
-.app.is-vscode .msg {
-  line-height: 1.55;
+.model-pill {
+  font-size: 12px;
+  color: var(--accent-2);
+  background: var(--accent-bg);
+  border: 1px solid var(--accent);
+  padding: 2px 10px;
+  border-radius: 12px;
+  margin-left: 4px;
 }
 
 /* ============================================================
@@ -434,7 +684,7 @@ button {
 .modal-mask {
   position: fixed;
   inset: 0;
-  background: rgba(0, 0, 0, 0.55);
+  background: rgba(15, 23, 42, 0.5);
   display: flex;
   align-items: center;
   justify-content: center;
@@ -442,12 +692,11 @@ button {
 }
 .modal {
   background: var(--bg-panel);
-  border: 1px solid var(--border);
   border-radius: 14px;
   padding: 22px 24px;
   width: 480px;
   max-width: 90vw;
-  box-shadow: 0 20px 60px rgba(0, 0, 0, 0.5);
+  box-shadow: var(--shadow-md);
 }
 .modal h3 {
   color: var(--magenta);
@@ -458,6 +707,7 @@ button {
   font-size: 15px;
   margin-bottom: 16px;
   line-height: 1.6;
+  color: var(--text);
 }
 .options {
   display: flex;
@@ -468,7 +718,7 @@ button {
 .opt {
   padding: 8px 14px;
   border-radius: 8px;
-  background: var(--bg-input);
+  background: var(--bg-hover);
   border: 1px solid var(--border);
   color: var(--text);
   font-size: 13px;
@@ -478,9 +728,9 @@ button {
   border-color: var(--accent);
 }
 .opt.sel {
-  background: rgba(76, 154, 255, 0.18);
+  background: var(--accent-bg);
   border-color: var(--accent);
-  color: var(--accent);
+  color: var(--accent-2);
 }
 .multi-tip {
   font-size: 12px;
@@ -526,41 +776,53 @@ button {
 /* Markdown 内容 */
 .markdown {
   word-break: break-word;
+  background: var(--bg-panel);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+  line-height: 1.65;
+  font-size: 13.5px;
+  box-shadow: var(--shadow-sm);
 }
 .markdown h1,
 .markdown h2,
 .markdown h3 {
-  margin: 12px 0 8px;
+  margin: 14px 0 8px;
   font-size: 15px;
+  color: var(--text);
 }
 .markdown h1 {
-  font-size: 17px;
+  font-size: 18px;
+  border-bottom: 1px solid var(--border);
+  padding-bottom: 6px;
 }
 .markdown p {
-  margin: 6px 0;
+  margin: 8px 0;
 }
 .markdown ul,
 .markdown ol {
-  margin: 6px 0 6px 20px;
+  margin: 6px 0 6px 22px;
 }
 .markdown code {
-  background: rgba(255, 255, 255, 0.08);
+  background: var(--bg-hover);
   padding: 1px 6px;
   border-radius: 4px;
   font-size: 12.5px;
   font-family: "Cascadia Code", Consolas, monospace;
+  color: var(--accent-2);
 }
 .markdown pre {
-  background: #0a0d14;
-  border: 1px solid var(--border);
+  background: #0f1117;
   border-radius: 8px;
-  padding: 12px;
+  padding: 12px 14px;
   overflow-x: auto;
   margin: 8px 0;
 }
 .markdown pre code {
   background: none;
   padding: 0;
+  color: #dde3ee;
+  font-size: 12.5px;
 }
 .markdown table {
   border-collapse: collapse;
@@ -572,6 +834,26 @@ button {
   padding: 6px 12px;
   font-size: 13px;
 }
+.markdown th {
+  background: var(--bg-hover);
+  font-weight: 600;
+}
 .markdown a {
   color: var(--accent);
+}
+
+/* ============================================================
+   响应式
+   ============================================================ */
+@media (max-width: 900px) {
+  .side {
+    display: none;
+  }
+  .messages {
+    padding: 16px 18px;
+  }
+  .user-body,
+  .agent-body {
+    max-width: 90%;
+  }
 }

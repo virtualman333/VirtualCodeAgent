@@ -46,8 +46,23 @@ function estimateTokens(text: string): number {
   return Math.max(1, Math.floor(text.length / CHARS_PER_TOKEN));
 }
 
+/** 将 message.content 安全转为字符串 (兼容字符串和数组 content) */
+function messageContentToString(content: unknown): string {
+  if (typeof content === "string") return content;
+  if (Array.isArray(content)) {
+    return content
+      .map((p) => {
+        if (typeof p === "string") return p;
+        if (p && typeof p === "object" && "text" in p) return String((p as { text?: unknown }).text ?? "");
+        return "";
+      })
+      .join("");
+  }
+  return String(content ?? "");
+}
+
 function messageTokens(msg: BaseMessage): number {
-  let base = estimateTokens(String(msg.content ?? ""));
+  let base = estimateTokens(messageContentToString(msg.content));
   if (msg instanceof ToolMessage) {
     base += 20;
   } else if (msg instanceof AIMessage && msg.tool_calls?.length) {
@@ -80,7 +95,7 @@ function messagesToText(messages: BaseMessage[]): string {
     const roleZh: Record<string, string> = { Human: "用户", AI: "Agent", Tool: "工具", System: "系统" };
     role = roleZh[role] ?? role;
 
-    let content = String(msg.content ?? "");
+    let content = messageContentToString(msg.content);
     if (msg instanceof ToolMessage) {
       const name = msg.name ?? "";
       if (content.length > 400) content = content.slice(0, 400) + "...(截断)";
@@ -135,9 +150,9 @@ ${transcript}
     const parts: string[] = [];
     for (const msg of dropped) {
       if (msg instanceof HumanMessage) {
-        parts.push(`用户: ${String(msg.content).slice(0, 80)}`);
+        parts.push(`用户: ${messageContentToString(msg.content).slice(0, 80)}`);
       } else if (msg instanceof AIMessage && !msg.tool_calls?.length && msg.content) {
-        parts.push(`Agent: ${String(msg.content).slice(0, 120)}`);
+        parts.push(`Agent: ${messageContentToString(msg.content).slice(0, 120)}`);
       }
     }
     return parts.slice(0, 20).join("\n");
@@ -162,8 +177,8 @@ async function trimContext(
 
   // Step 1: 压缩长工具结果 (>15000 字符, 保留头尾)
   body = body.map((msg) => {
-    if (msg instanceof ToolMessage && String(msg.content ?? "").length > 15000) {
-      const content = String(msg.content);
+    if (msg instanceof ToolMessage && messageContentToString(msg.content).length > 15000) {
+      const content = messageContentToString(msg.content);
       const head = content.slice(0, 12000);
       const tail = content.slice(-3000);
       return new ToolMessage({
@@ -197,8 +212,8 @@ async function trimContext(
   if (turnBoundaries.length <= keepTurns) {
     // 轮次不多 → 说明是工具结果太大，激进压缩 (仍保留头尾)
     body = body.map((msg) => {
-      if (msg instanceof ToolMessage && String(msg.content ?? "").length > 8000) {
-        const content = String(msg.content);
+      if (msg instanceof ToolMessage && messageContentToString(msg.content).length > 8000) {
+        const content = messageContentToString(msg.content);
         const head = content.slice(0, 6000);
         const tail = content.slice(-2000);
         return new ToolMessage({
@@ -296,7 +311,7 @@ export class CodingAgent {
   async *stream(state: AgentState): AsyncGenerator<Record<string, Partial<AgentState>>> {
     const updates = await this.graph.stream(
       state as unknown as typeof StateAnnotation.State,
-      { streamMode: "updates" }
+      { streamMode: "updates", recursionLimit: getRecursionLimit() }
     );
     for await (const step of updates) {
       yield step as unknown as Record<string, Partial<AgentState>>;
@@ -305,10 +320,21 @@ export class CodingAgent {
 
   async invoke(state: AgentState): Promise<AgentState> {
     const result = await this.graph.invoke(
-      state as unknown as typeof StateAnnotation.State
+      state as unknown as typeof StateAnnotation.State,
+      { recursionLimit: getRecursionLimit() }
     );
     return result as unknown as AgentState;
   }
+}
+
+/**
+ * 计算 LangGraph 递归步数上限。
+ * 每轮工具循环消耗 2 步 (agent 节点 + tools 节点)，
+ * 再预留最终 respond 等收尾节点。
+ */
+export function getRecursionLimit(): number {
+  const maxIter = Config.MAX_TOOL_ITERATIONS || 10;
+  return maxIter * 2 + 10;
 }
 
 export function buildGraph(agent: CodingAgent) {

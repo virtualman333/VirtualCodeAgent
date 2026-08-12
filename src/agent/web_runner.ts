@@ -16,13 +16,16 @@ import {
   AIMessage,
   HumanMessage,
   ToolMessage,
+  type MessageContent,
 } from "@langchain/core/messages";
 
 import type { AgentState, PendingQuestion } from "./state.js";
 import type { CodingAgent } from "./graph.js";
 
 export interface WebEvent {
-  type: "thinking" | "tool_call" | "tool_result" | "plan" | "final" | "ask_user" | "usage" | "info" | "running" | "workspace" | "external" | "model" | "models";
+  type: "thinking" | "tool_call" | "tool_result" | "plan" | "final" | "ask_user" | "usage" | "info" | "running" | "workspace" | "external" | "model" | "models" | "context" | "enhance_presets" | "enhance_result" | "session_id" | "session_list" | "session_created" | "session_closed";
+  /** 事件所属会话 (多 tab 路由) */
+  sessionId?: string;
   [key: string]: unknown;
 }
 
@@ -30,11 +33,24 @@ export interface RunOptions {
   agent: CodingAgent;
   state: AgentState;
   userInput: string;
+  /** 用户附带的图片 (data URL 数组) */
+  images?: string[];
   send: (event: WebEvent) => void;
   /** 等待用户对 ask_user 的回答; 返回 null 表示取消 */
   waitAnswer: (pending: PendingQuestion) => Promise<string | null>;
   /** 是否被取消 (外部设置为 true 时安全停止) */
   isCancelled: () => boolean;
+}
+
+/** 构造用户消息 content (文本 + 图片多模态) */
+export function buildUserContent(text: string, images: string[] = []): MessageContent {
+  if (!images || images.length === 0) return text;
+  const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [];
+  if (text) parts.push({ type: "text", text });
+  for (const img of images) {
+    parts.push({ type: "image_url", image_url: { url: img } });
+  }
+  return parts as unknown as MessageContent;
 }
 
 function truncateForWeb(text: string, max = 4000): string {
@@ -43,9 +59,11 @@ function truncateForWeb(text: string, max = 4000): string {
 }
 
 export async function runAgentForWeb(opts: RunOptions): Promise<void> {
-  const { agent, state, userInput, send, waitAnswer, isCancelled } = opts;
+  const { agent, state, userInput, images, send, waitAnswer, isCancelled } = opts;
 
-  state.messages.push(new HumanMessage({ content: userInput }));
+  state.messages.push(
+    new HumanMessage({ content: buildUserContent(userInput, images) })
+  );
   state.pending_question = null;
   send({ type: "running", value: true });
 

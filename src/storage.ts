@@ -22,14 +22,23 @@ const INDEX_FILE = path.join(VCA_DIR, "session_index.json");
 
 type MessageDict = {
   type: string;
-  content: string;
+  /** content 可以是字符串 (纯文本) 或字符串数组 (多模态 parts) */
+  content: string | Array<{ type: string; text?: string; image_url?: { url: string } }>;
   tool_calls?: Array<{ name: string; args: Record<string, unknown>; id: string }>;
   tool_call_id?: string;
   name?: string;
 };
 
 export function messageToDict(msg: BaseMessage): MessageDict {
-  const out: MessageDict = { type: msg.constructor.name, content: String(msg.content ?? "") };
+  const raw = msg.content;
+  let content: MessageDict["content"];
+  if (Array.isArray(raw)) {
+    // 多模态 content (如含图片的 HumanMessage)
+    content = raw as MessageDict["content"];
+  } else {
+    content = String(raw ?? "");
+  }
+  const out: MessageDict = { type: msg.constructor.name, content };
   if (msg instanceof AIMessage) {
     if (msg.tool_calls?.length) {
       out.tool_calls = msg.tool_calls.map((tc) => ({
@@ -50,7 +59,7 @@ export function dictToMessage(data: MessageDict): BaseMessage {
   const type = data.type.replace("Message", "").toLowerCase();
   switch (type) {
     case "human":
-      return new HumanMessage({ content });
+      return new HumanMessage({ content: content as never });
     case "ai": {
       const toolCalls = data.tool_calls;
       if (toolCalls?.length) {

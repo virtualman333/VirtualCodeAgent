@@ -1,15 +1,16 @@
 /**
- * AgentHost - 扩展侧 RPC 桥接层
+ * AgentHost - 扩展侧 RPC 桥接层 (多会话)
  *
  * 复用核心引擎 (AgentSession / runAgentForWeb)，把流式事件
  * 通过 emit 回调发送到 Webview。
+ * 支持多个独立会话 (多 tab 并行执行)。
  */
 import { AgentSession } from "../../src/agent/session.js";
 import type { WebEvent } from "../../src/agent/web_runner.js";
 import { VSCODE_TOOLS } from "./vscodeTools.js";
 
 export class AgentHost {
-  private session: AgentSession;
+  private sessions = new Map<string, AgentSession>();
   private rawEmit: (e: WebEvent) => void;
   private emitWrapped: (e: WebEvent) => void;
 
@@ -30,100 +31,155 @@ export class AgentHost {
       this.rawEmit(e);
     };
 
-    // VS Code 专属工具仅在此入口注入 (浏览器/CLI 不包含)
-    this.session = new AgentSession(workspaceDir, VSCODE_TOOLS);
-
-    // 上报当前工作空间 (前端侧边栏显示 + 扩展侧记录)
-    this.emitWrapped({ type: "workspace", path: this.session.state.workspace_dir });
-    // 上报模型列表 + 当前模型
-    this.emitWrapped({ type: "models", models: this.session.getModels(), current: this.session.modelName });
-    this.emitWrapped({ type: "model", name: this.session.modelName });
+    // 连接即创建首个会话 (默认 tab)
+    const first = this.createSession(workspaceDir);
+    this.emitWrapped({ type: "workspace", path: first.state.workspace_dir });
+    this.emitWrapped({ type: "models", models: first.getModels(), current: first.modelName });
+    this.emitWrapped({ type: "model", name: first.modelName });
+    this.emitWrapped({ type: "context", ...first.getContextInfo() });
+    this.emitWrapped({ type: "session_id", id: first.id });
   }
 
   get workspaceDir(): string {
-    return this.session.state.workspace_dir;
+    const first = [...this.sessions.values()][0];
+    return first?.state.workspace_dir ?? "";
   }
 
   /** 工作空间变化回调 (扩展侧监听) */
   onWorkspace: ((dir: string) => void) | null = null;
 
-  /** 取消当前任务 (面板销毁时调用) */
+  /** 取消所有会话任务 (面板销毁时调用) */
   cancel(): void {
-    this.session.cancel();
+    for (const s of this.sessions.values()) s.cancel();
   }
 
   /**
    * 从扩展侧注入用户消息 (如"发送选中文本到 Agent")。
-   * 前端收到 external 事件后作为用户消息发送。
+   * 发送到当前(首个)会话。
    */
   externalInput(content: string): void {
     const text = String(content ?? "").trim();
     if (!text) return;
-    this.rawEmit({ type: "external", content: text });
+    const first = [...this.sessions.values()][0];
+    if (first) {
+      this.rawEmit({ type: "external", content: text, sessionId: first.id });
+    }
+  }
+
+  private createSession(workspaceDir: string, id?: string): AgentSession {
+    const s = new AgentSession(workspaceDir, VSCODE_TOOLS, id);
+    this.sessions.set(s.id, s);
+    return s;
+  }
+
+  private getSession(payload: Record<string, unknown>): AgentSession | null {
+    const sid = String(payload.session_id ?? "");
+    return this.sessions.get(sid) ?? null;
   }
 
   /** 处理来自 Webview 的 RPC 消息 */
   async handle(payload: Record<string, unknown>): Promise<void> {
     const type = String(payload.type ?? "");
     try {
+      // ---- 会话管理 ----
+      if (type === "new_session") {
+        const s = this.createSession(this.workspaceDir);
+        this.emitWrapped({ type: "session_created", id: s.id, title: s.title, sessionId: s.id });
+        this.emitWrapped({ type: "workspace", path: s.state.workspace_dir, sessionId: s.id });
+        this.emitWrapped({ type: "models", models: s.getModels(), current: s.modelName, sessionId: s.id });
+        this.emitWrapped({ type: "model", name: s.modelName, sessionId: s.id });
+        this.emitWrapped({ type: "context", ...s.getContextInfo(), sessionId: s.id });
+        return;
+      }
+      if (type === "close_session") {
+        const s = this.getSession(payload);
+        if (s) {
+          s.cancel();
+          this.sessions.delete(s.id);
+          this.emitWrapped({ type: "session_closed", id: s.id, sessionId: s.id });
+        }
+        return;
+      }
+
+      const session = this.getSession(payload);
+      if (!session) return;
+      const emit = (e: WebEvent): void => this.emitWrapped({ ...e, sessionId: session.id });
+
       switch (type) {
         case "chat": {
           const content = String(payload.content ?? "").trim();
-          if (content) await this.session.chat(content, this.emitWrapped);
+          const images = Array.isArray(payload.images)
+            ? (payload.images as unknown[]).filter((x): x is string => typeof x === "string")
+            : [];
+          if (content || images.length > 0) await session.chat(content, images, emit);
           break;
         }
         case "answer": {
           const content = String(payload.content ?? "").trim();
-          this.session.answer(content ? `用户回答: ${content}` : "[用户选择跳过]");
+          session.answer(content ? `用户回答: ${content}` : "[用户选择跳过]");
           break;
         }
         case "answer_option": {
           const option = String(payload.content ?? "").trim();
-          this.session.answer(option ? `用户选择了: ${option}` : "[用户选择跳过]");
+          session.answer(option ? `用户选择了: ${option}` : "[用户选择跳过]");
           break;
         }
         case "skip_question":
-          this.session.answer("[用户选择跳过]");
+          session.answer("[用户选择跳过]");
           break;
         case "cancel":
-          this.session.cancel();
+          session.cancel();
           break;
         case "ping":
-          this.emitWrapped({ type: "info", text: "pong" });
+          emit({ type: "info", text: "pong" });
           break;
         case "set_model": {
           const name = String(payload.name ?? "");
-          if (this.session.setModel(name)) {
-            this.emitWrapped({ type: "model", name: this.session.modelName });
-            this.emitWrapped({ type: "info", text: `已切换模型: ${this.session.modelName}` });
+          if (session.setModel(name)) {
+            emit({ type: "model", name: session.modelName });
+            emit({ type: "info", text: `已切换模型: ${session.modelName}` });
           } else {
-            this.emitWrapped({ type: "info", text: `未找到模型: ${name}` });
+            emit({ type: "info", text: `未找到模型: ${name}` });
           }
           break;
         }
         case "get_models": {
-          this.emitWrapped({
-            type: "models",
-            models: this.session.getModels(),
-            current: this.session.modelName,
-          });
+          emit({ type: "models", models: session.getModels(), current: session.modelName });
+          break;
+        }
+        case "get_context": {
+          emit({ type: "context", ...session.getContextInfo() });
+          break;
+        }
+        case "enhance": {
+          const input = String(payload.input ?? "").trim();
+          if (!input) {
+            emit({ type: "enhance_result", error: "输入为空" });
+          } else {
+            try {
+              const enhanced = await session.enhanceInput(input);
+              emit({ type: "enhance_result", text: enhanced });
+            } catch (e) {
+              emit({ type: "enhance_result", error: (e as Error).message });
+            }
+          }
           break;
         }
         case "workspace": {
           const dir = String(payload.path ?? "");
           if (dir) {
-            const ok = this.session.setWorkspace(dir);
+            const ok = session.setWorkspace(dir);
             if (ok) {
-              this.emitWrapped({ type: "workspace", path: this.session.state.workspace_dir });
-              this.emitWrapped({ type: "info", text: `已切换工作空间: ${this.session.state.workspace_dir}` });
+              emit({ type: "workspace", path: session.state.workspace_dir });
+              emit({ type: "info", text: `已切换工作空间: ${session.state.workspace_dir}` });
             } else {
-              this.emitWrapped({ type: "info", text: `切换失败: ${dir}` });
+              emit({ type: "info", text: `切换失败: ${dir}` });
             }
           }
           break;
         }
         default:
-          this.emitWrapped({ type: "info", text: `未知消息类型: ${type}` });
+          emit({ type: "info", text: `未知消息类型: ${type}` });
       }
     } catch (e) {
       this.emitWrapped({ type: "info", text: `[ERROR] ${(e as Error).message}` });
