@@ -6,6 +6,7 @@
  */
 import { AgentSession } from "../../src/agent/session.js";
 import type { WebEvent } from "../../src/agent/web_runner.js";
+import { VSCODE_TOOLS } from "./vscodeTools.js";
 
 export class AgentHost {
   private session: AgentSession;
@@ -29,7 +30,8 @@ export class AgentHost {
       this.rawEmit(e);
     };
 
-    this.session = new AgentSession(workspaceDir);
+    // VS Code 专属工具仅在此入口注入 (浏览器/CLI 不包含)
+    this.session = new AgentSession(workspaceDir, VSCODE_TOOLS);
 
     // 上报当前工作空间 (前端侧边栏显示 + 扩展侧记录)
     this.emitWrapped({ type: "workspace", path: this.session.state.workspace_dir });

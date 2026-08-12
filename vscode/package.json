@@ -2,7 +2,7 @@
   "name": "vca-coding-agent",
   "displayName": "VCA Coding Agent",
   "description": "Virtual Code Agent - LangGraph.js 驱动的编码 Agent，在 IDE 内直接对话完成任务",
-  "version": "0.1.0",
+  "version": "0.1.2",
   "publisher": "vca",
   "license": "MIT",
   "engines": {

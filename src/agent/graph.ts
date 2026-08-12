@@ -255,7 +255,11 @@ export class CodingAgent {
   mcpTools: StructuredToolInterface[];
   modelConfig: ModelConfig;
 
-  constructor(modelConfig: ModelConfig, mcpTools: StructuredToolInterface[] = []) {
+  constructor(
+    modelConfig: ModelConfig,
+    mcpTools: StructuredToolInterface[] = [],
+    extraTools: StructuredToolInterface[] = []
+  ) {
     this.modelConfig = modelConfig;
     Config.validate();
 
@@ -275,10 +279,10 @@ export class CodingAgent {
       temperature: 0.0,
     });
 
-    // 动态工具池: 内置 + Skills + MCP
+    // 动态工具池: 内置 + Skills + MCP + 环境专属工具 (如 VS Code API)
     this.mcpTools = mcpTools;
-    this.allTools = [...ALL_TOOLS, ...mcpTools];
-    const executable = [...EXECUTABLE_TOOLS, ...mcpTools];
+    this.allTools = [...ALL_TOOLS, ...mcpTools, ...extraTools];
+    const executable = [...EXECUTABLE_TOOLS, ...mcpTools, ...extraTools];
 
     this.llmWithTools = this.llm.bindTools(this.allTools);
     this.executableToolNode = new ToolNode(executable);
@@ -462,9 +466,12 @@ async function connectMcpOnce(): Promise<StructuredToolInterface[]> {
   return connectingMcp;
 }
 
-export async function createCodingAgent(modelName?: string | null): Promise<CodingAgent> {
+export async function createCodingAgent(
+  modelName?: string | null,
+  extraTools: StructuredToolInterface[] = []
+): Promise<CodingAgent> {
   Config.validate();
   const mcpTools = await connectMcpOnce();
   const modelConfig = Config.getModelConfig(modelName ?? null);
-  return new CodingAgent(modelConfig, mcpTools);
+  return new CodingAgent(modelConfig, mcpTools, extraTools);
 }

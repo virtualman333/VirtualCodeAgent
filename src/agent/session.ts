@@ -17,18 +17,22 @@ import { runAgentForWeb, type WebEvent } from "./web_runner.js";
 import { saveSession, generateSessionId, loadSession } from "../storage.js";
 import { Config, type ModelConfig } from "../config.js";
 import { setWorkspace } from "../workspace_ctx.js";
+import type { StructuredToolInterface } from "@langchain/core/tools";
 
 export class AgentSession {
   state: AgentState;
   /** 当前使用的模型名 (对应 Config.getModels() 中的 name) */
   modelName: string;
+  /** 环境专属工具 (如 VS Code API 工具，仅扩展入口注入) */
+  private extraTools: StructuredToolInterface[];
   private waitingResolve: ((answer: string | null) => void) | null = null;
   private cancelled = false;
   private running = false;
 
-  constructor(workspaceDir: string) {
+  constructor(workspaceDir: string, extraTools: StructuredToolInterface[] = []) {
     this.state = createInitialState(workspaceDir);
     this.modelName = Config.getDefaultModelName();
+    this.extraTools = extraTools;
   }
 
   get isRunning(): boolean {
@@ -67,7 +71,7 @@ export class AgentSession {
     this.waitingResolve = null;
 
     try {
-      const agent = await createCodingAgent(this.modelName);
+      const agent = await createCodingAgent(this.modelName, this.extraTools);
       emit({ type: "model", name: this.modelName });
       emit({ type: "info", text: "任务开始执行..." });
       await runAgentForWeb({
