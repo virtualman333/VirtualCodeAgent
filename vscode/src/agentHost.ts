@@ -7,6 +7,13 @@
  */
 import { AgentSession } from "../../src/agent/session.js";
 import type { WebEvent } from "../../src/agent/web_runner.js";
+import {
+  getSettingsView,
+  saveGeneralSettings,
+  saveMcpConfig,
+  reconnectMcp,
+  reloadConfig,
+} from "../../src/settings.js";
 import { VSCODE_TOOLS } from "./vscodeTools.js";
 
 export class AgentHost {
@@ -98,6 +105,53 @@ export class AgentHost {
           this.sessions.delete(s.id);
           this.emitWrapped({ type: "session_closed", id: s.id, sessionId: s.id });
         }
+        return;
+      }
+
+      // ---- 设置 (全局, 用首个会话 emit) ----
+      const targetId = [...this.sessions.values()][0]?.id ?? "";
+      const emitGlobal = (e: WebEvent): void => this.emitWrapped({ ...e, sessionId: targetId });
+
+      if (type === "get_settings") {
+        emitGlobal({ type: "settings", settings: getSettingsView() });
+        return;
+      }
+      if (type === "save_general_settings") {
+        const result = saveGeneralSettings((payload.updates as Record<string, unknown>) ?? {});
+        emitGlobal({
+          type: "settings_result",
+          section: "general",
+          ok: result.ok,
+          error: result.error,
+          settings: getSettingsView(),
+        });
+        return;
+      }
+      if (type === "save_mcp_config") {
+        const servers = Array.isArray(payload.servers) ? payload.servers : [];
+        const result = saveMcpConfig(servers as Parameters<typeof saveMcpConfig>[0]);
+        if (result.ok) {
+          const status = await reconnectMcp();
+          emitGlobal({ type: "settings_result", section: "mcp", ok: true, mcp_status: status, settings: getSettingsView() });
+        } else {
+          emitGlobal({ type: "settings_result", section: "mcp", ok: false, error: result.error });
+        }
+        return;
+      }
+      if (type === "reconnect_mcp") {
+        const status = await reconnectMcp();
+        emitGlobal({ type: "settings_result", section: "mcp", ok: true, mcp_status: status, settings: getSettingsView() });
+        return;
+      }
+      if (type === "reload_config") {
+        const result = reloadConfig();
+        emitGlobal({
+          type: "settings_result",
+          section: "config",
+          ok: result.ok,
+          error: result.error,
+          settings: result.ok ? getSettingsView() : undefined,
+        });
         return;
       }
 

@@ -1,3 +1,31 @@
-<svg xmlns="http://www.w3.org/2000/svg" width="24" height="24" viewBox="0 0 24 24">
-  <path d="M13 2 4.5 13h5L8 22l9.5-11h-5L13 2z" fill="#C5C5C5"/>
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#0ea5e9"/>
+      <stop offset="50%" stop-color="#38bdf8"/>
+      <stop offset="100%" stop-color="#7c3aed"/>
+    </linearGradient>
+    <linearGradient id="fg" x1="0" y1="0" x2="1" y2="1">
+      <stop offset="0%" stop-color="#7dd3fc"/>
+      <stop offset="100%" stop-color="#c4b5fd"/>
+    </linearGradient>
+  </defs>
+  <!-- 圆角背景 -->
+  <rect x="2" y="2" width="60" height="60" rx="14" fill="url(#bg)"/>
+  <!-- 装饰光晕 -->
+  <circle cx="48" cy="18" r="6" fill="url(#fg)" opacity="0.6"/>
+  <!-- 中央机器人头 (简化版) -->
+  <g stroke="url(#fg)" stroke-width="2.2" fill="none" stroke-linecap="round" stroke-linejoin="round">
+    <!-- 头 -->
+    <path d="M22 28 Q22 22 28 22 L36 22 Q42 22 42 28 L42 36 Q42 42 36 42 L28 42 Q22 42 22 36 Z"/>
+    <!-- 眼 -->
+    <circle cx="28.5" cy="31.5" r="1.6" fill="url(#fg)"/>
+    <circle cx="35.5" cy="31.5" r="1.6" fill="url(#fg)"/>
+    <!-- 嘴/天线 (微笑) -->
+    <path d="M29 37 Q32 39 35 37"/>
+  </g>
+  <!-- 代码括号 -->
+  <text x="10" y="54" font-family="Consolas, monospace" font-size="10" font-weight="700" fill="url(#fg)">&lt;/&gt;</text>
+  <text x="42" y="18" font-family="Consolas, monospace" font-size="8" font-weight="700" fill="#fff">VCA</text>
 </svg>

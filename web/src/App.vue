@@ -2,10 +2,12 @@
 import { ref, nextTick, onMounted, onUnmounted, computed } from "vue";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
-import ToolCallCard from "./components/ToolCallCard.vue";
+import { ChatList as TChatList, ChatSender as TChatSender } from "@tdesign-vue-next/chat";
+import MsgBlock from "./components/MsgBlock.vue";
 import TodoPanel from "./components/TodoPanel.vue";
 import PlanList from "./components/PlanList.vue";
 import AskUserModal from "./components/AskUserModal.vue";
+import SettingsPanel from "./components/SettingsPanel.vue";
 import {
   isVscodeEnv,
   createVscodeTransport,
@@ -72,6 +74,7 @@ interface ChatTab {
   attachedImages: AttachedImage[];
   running: boolean;
   plan: string;
+  planDismissed: boolean;
   ctxTokens: number;
   ctxMax: number;
   ctxMessages: number;
@@ -87,12 +90,17 @@ const tabs = ref<ChatTab[]>([]);
 const activeTabId = ref("");
 const connected = ref(false);
 const model = ref("—");
+const settingsOpen = ref(false);
+const settingsData = ref<unknown>(null);
+const settingsBusy = ref(false);
 const models = ref<ModelOption[]>([]);
 const workspace = ref("");
 const enhancing = ref(false);
-const scrollRef = ref<HTMLElement | null>(null);
-const textareaRef = ref<HTMLTextAreaElement | null>(null);
-const fileInputRef = ref<HTMLInputElement | null>(null);
+const chatListRef = ref<InstanceType<typeof TChatList> | null>(null);
+const senderRef = ref<InstanceType<typeof TChatSender> | null>(null);
+
+/** ChatSender 操作区: 启用内置图片上传按钮 + 发送按钮 */
+const senderActions = [{ name: "uploadImage", uploadProps: { multiple: true, accept: "image/*" } }, "send"] as unknown[];
 
 const isVscode = isVscodeEnv();
 
@@ -117,6 +125,15 @@ const input = computed({
 const attachedImages = computed<AttachedImage[]>(() => activeTab.value?.attachedImages ?? []);
 const running = computed(() => activeTab.value?.running ?? false);
 const plan = computed(() => activeTab.value?.plan ?? "");
+
+/** 映射为 TDesign ChatList 的消息数据 (自定义字段 msg 供 content 插槽渲染) */
+const chatData = computed(() =>
+  messages.value.map((m) => ({
+    role: m.kind === "user" ? "user" : "assistant",
+    msg: m,
+    content: [] as unknown[],
+  }))
+);
 const askPending = computed(() => activeTab.value?.askPending ?? null);
 
 function createTab(sessionId?: string, title = "新对话"): ChatTab {
@@ -128,6 +145,7 @@ function createTab(sessionId?: string, title = "新对话"): ChatTab {
     attachedImages: [],
     running: false,
     plan: "",
+    planDismissed: false,
     ctxTokens: 0,
     ctxMax: 0,
     ctxMessages: 0,
@@ -154,22 +172,18 @@ function pushTo(tab: ChatTab, m: Omit<Msg, "id">): void {
 
 function scrollToBottom(): void {
   nextTick(() => {
-    const el = scrollRef.value;
-    if (el) el.scrollTop = el.scrollHeight;
+    chatListRef.value?.scrollToBottom?.({ behavior: "smooth" } as never);
   });
+}
+
+function focusInput(): void {
+  const el = (senderRef.value as any)?.$el;
+  const ta = el && typeof el.querySelector === "function" ? el.querySelector("textarea") : null;
+  (ta ?? document.querySelector<HTMLTextAreaElement>(".t-chat-sender textarea"))?.focus();
 }
 
 function renderMd(text: string): string {
   return DOMPurify.sanitize(marked.parse(text) as string);
-}
-
-function fmtNum(n: number): string {
-  return Math.round(n || 0).toLocaleString();
-}
-
-function formatDuration(ms: number): string {
-  if (!ms) return "-";
-  return ms < 1000 ? `${Math.round(ms)}ms` : `${(ms / 1000).toFixed(1)}s`;
 }
 
 function formatTokens(n: number): string {
@@ -244,13 +258,6 @@ function onPaste(ev: ClipboardEvent): void {
   void handlePastedFiles(files);
 }
 
-function onFilePicker(ev: Event): void {
-  const files = (ev.target as HTMLInputElement).files;
-  if (!files) return;
-  void handlePastedFiles(Array.from(files));
-  (ev.target as HTMLInputElement).value = "";
-}
-
 function removeImage(id: string): void {
   const tab = activeTab.value;
   if (tab) tab.attachedImages = tab.attachedImages.filter((i) => i.id !== id);
@@ -274,27 +281,6 @@ function getInputDisplayText(): string {
 // 自动增高 / 换行 / 发送
 // ============================================================
 
-function autoResize(): void {
-  const el = textareaRef.value;
-  if (!el) return;
-  el.style.height = "auto";
-  el.style.height = `${Math.min(el.scrollHeight + 2, 220)}px`;
-}
-
-function insertNewline(): void {
-  const el = textareaRef.value;
-  if (!el) return;
-  const start = el.selectionStart;
-  const end = el.selectionEnd;
-  if (activeTab.value) {
-    activeTab.value.input = activeTab.value.input.slice(0, start) + "\n" + activeTab.value.input.slice(end);
-  }
-  requestAnimationFrame(() => {
-    el.selectionStart = el.selectionEnd = start + 1;
-  });
-  autoResize();
-}
-
 function onSend(): void {
   const tab = activeTab.value;
   if (!tab || !transport || !connected.value || tab.running) return;
@@ -310,8 +296,14 @@ function onSend(): void {
   });
   tab.input = "";
   tab.attachedImages = [];
-  autoResize();
-  requestAnimationFrame(() => textareaRef.value?.focus());
+  requestAnimationFrame(focusInput);
+}
+
+/** ChatSender 内置图片上传按钮回调 */
+function onSenderFileSelect(e: unknown): void {
+  const detail = (e as { detail?: unknown })?.detail ?? e;
+  const files = (detail as { files?: File[] })?.files;
+  if (files && files.length) void handlePastedFiles(Array.from(files));
 }
 
 function cancel(): void {
@@ -375,14 +367,51 @@ function openFileInEditor(filePath: string, line?: number): void {
 }
 
 // ============================================================
+// 设置
+// ============================================================
+
+function openSettings(): void {
+  settingsOpen.value = true;
+  settingsBusy.value = true;
+  transport?.send({ type: "get_settings", session_id: activeTab.value?.sessionId ?? "" });
+}
+function closeSettings(): void {
+  settingsOpen.value = false;
+}
+function saveGeneralSettings(updates: Record<string, unknown>): void {
+  settingsBusy.value = true;
+  transport?.send({
+    type: "save_general_settings",
+    updates,
+    session_id: activeTab.value?.sessionId ?? "",
+  });
+}
+function saveMcpConfig(servers: unknown[]): void {
+  settingsBusy.value = true;
+  transport?.send({
+    type: "save_mcp_config",
+    servers,
+    session_id: activeTab.value?.sessionId ?? "",
+  });
+}
+function reconnectMcp(): void {
+  settingsBusy.value = true;
+  transport?.send({ type: "reconnect_mcp", session_id: activeTab.value?.sessionId ?? "" });
+}
+function reloadConfig(): void {
+  settingsBusy.value = true;
+  transport?.send({ type: "reload_config", session_id: activeTab.value?.sessionId ?? "" });
+}
+
+// ============================================================
 // Tab 管理
 // ============================================================
 
 function newTab(): void {
-  const tab = createTab();
+  createTab();
   transport?.send({ type: "new_session" });
   // 后端返回 session_created 时更新 sessionId
-  requestAnimationFrame(() => textareaRef.value?.focus());
+  requestAnimationFrame(focusInput);
 }
 
 function switchTab(id: string): void {
@@ -503,6 +532,26 @@ function handleEvent(e: ServerEvent): void {
     model.value = String(e.name ?? "");
     return;
   }
+  if (e.type === "settings") {
+    settingsData.value = e.settings ?? null;
+    settingsBusy.value = false;
+    return;
+  }
+  if (e.type === "settings_result") {
+    settingsBusy.value = false;
+    if (e.settings) settingsData.value = e.settings;
+    const tabForInfo = activeTab.value ?? tab;
+    if (tabForInfo) {
+      if (String(e.section ?? "") === "config") {
+        pushTo(tabForInfo, { kind: "info", content: e.ok ? "✅ 配置已重新加载" : `重载失败: ${String(e.error ?? "")}` });
+      } else if (e.ok) {
+        pushTo(tabForInfo, { kind: "info", content: `设置已保存 (${String(e.section ?? "")})` });
+      } else {
+        pushTo(tabForInfo, { kind: "info", content: `保存失败: ${String(e.error ?? "")}` });
+      }
+    }
+    return;
+  }
 
   if (!tab) tab = activeTab.value;
   if (!tab) return;
@@ -540,6 +589,7 @@ function handleEvent(e: ServerEvent): void {
     }
     case "plan":
       tab.plan = String(e.content ?? "");
+      tab.planDismissed = false;
       break;
     case "final":
       pushTo(tab, { kind: "final", html: renderMd(String(e.content ?? "")) });
@@ -580,8 +630,7 @@ function handleEvent(e: ServerEvent): void {
         pushTo(tab, { kind: "info", content: `增强失败: ${e.error}` });
       } else {
         tab.input = String(e.text ?? "");
-        autoResize();
-        requestAnimationFrame(() => textareaRef.value?.focus());
+        requestAnimationFrame(focusInput);
       }
       break;
     case "external": {
@@ -602,7 +651,7 @@ function handleEvent(e: ServerEvent): void {
 
 onMounted(() => {
   initTransport();
-  requestAnimationFrame(() => textareaRef.value?.focus());
+  requestAnimationFrame(focusInput);
 });
 
 onUnmounted(() => {
@@ -629,6 +678,7 @@ onUnmounted(() => {
         <span>＋</span>
       </div>
       <div class="tab-actions">
+        <button class="settings-btn" title="设置" @click="openSettings">⚙️</button>
         <span class="conn-status">
           <span class="dot" :class="{ on: connected }" />
           {{ connected ? "已连接" : "连接中..." }}
@@ -639,78 +689,44 @@ onUnmounted(() => {
     <div class="main">
       <!-- 聊天区 -->
       <div class="chat">
-        <div class="messages" ref="scrollRef">
+        <TChatList
+          ref="chatListRef"
+          class="chat-list"
+          :data="chatData as any"
+          layout="both"
+          :auto-scroll="true"
+          default-scroll-to="bottom"
+          :show-scroll-button="true"
+        >
           <!-- 空状态 -->
-          <div v-if="messages.length === 0" class="empty-state">
-            <div class="empty-avatar">
-              <span class="logo-mark">⚡</span>
-            </div>
-            <div class="empty-name">VCA</div>
-            <div class="empty-sub">Virtual Code Agent — 开始一次对话吧</div>
-            <div class="empty-tips">
-              <div>📎 直接粘贴/拖入图片到输入框</div>
-              <div>⌨️ Enter 发送，Shift+Enter 换行</div>
-              <div>📋 在编辑器中选中文本，右键发送到 Agent</div>
-            </div>
-          </div>
-
-          <template v-for="m in messages" :key="m.id">
-            <div v-if="m.kind === 'user'" class="msg user-msg">
-              <div class="user-body">
-                <div v-if="m.images && m.images.length" class="user-images">
-                  <img v-for="img in m.images" :key="img.id" :src="img.dataUrl" />
-                </div>
-                <div v-if="m.content" class="user-text">{{ m.content }}</div>
+          <template #default>
+            <div class="empty-state">
+              <div class="empty-avatar">
+                <img src="/logo-512.png" alt="VCA Logo" class="logo-img"/>
               </div>
-            </div>
-
-            <div v-else-if="m.kind === 'thinking'" class="msg agent-msg">
-              <div class="agent-body">
-                <details class="think-card" open>
-                  <summary class="think-head">🧠 深度思考</summary>
-                  <div class="think-body">{{ m.content }}</div>
-                </details>
+              <div class="empty-name">VCA</div>
+              <div class="empty-sub">Virtual Code Agent — 开始一次对话吧</div>
+              <div class="empty-tips">
+                <div>📎 直接粘贴/拖入图片到输入框</div>
+                <div>⌨️ Enter 发送，Shift+Enter 换行</div>
+                <div>📋 在编辑器中选中文本，右键发送到 Agent</div>
               </div>
-            </div>
-
-            <div v-else-if="m.kind === 'tool'" class="msg tool-msg">
-              <ToolCallCard
-                :name="m.tool!.name"
-                :args="m.tool!.args"
-                :result="m.tool!.result"
-                :running="m.tool!.running"
-                :show-open="isVscode"
-                @open-file="openFileInEditor"
-              />
-            </div>
-
-            <div v-else-if="m.kind === 'final'" class="msg agent-msg final-msg">
-              <div class="agent-body">
-                <div class="final-name">VCA</div>
-                <div class="markdown" v-html="m.html"></div>
-              </div>
-            </div>
-
-            <div v-else-if="m.kind === 'info'" class="msg info">{{ m.content }}</div>
-
-            <div v-else-if="m.kind === 'usage'" class="msg usage">
-              <span class="usage-bar">
-                📊 Token {{ fmtNum(m.usage!.input_tokens) }}↑ / {{ fmtNum(m.usage!.output_tokens) }}↓
-                / 共 {{ fmtNum(m.usage!.total_tokens) }}
-                <template v-if="m.usage!.tool_count"> | 工具 {{ m.usage!.tool_count }} 次</template>
-                | 耗时 {{ formatDuration(m.usage!.llm_duration_ms + m.usage!.tool_duration_ms) }}
-              </span>
             </div>
           </template>
-        </div>
+
+          <!-- 每条消息自定义渲染 -->
+          <template #content="{ item }">
+            <MsgBlock :msg="(item as any)?.msg" :vscode="isVscode" @open-file="openFileInEditor" />
+          </template>
+        </TChatList>
 
         <!-- 任务清单列表 (在消息区与输入区之间) -->
-        <div class="plan-slot" v-if="plan">
-          <PlanList :plan="plan" />
+        <div class="plan-slot" v-if="plan && !planDismissed">
+          <PlanList :plan="plan" @close="activeTab && (activeTab.planDismissed = true)" />
         </div>
 
         <!-- 输入区 -->
-        <div class="input-area">
+        <div class="input-area" @paste="onPaste">
           <div v-if="attachedImages.length" class="attached-images">
             <div v-for="img in attachedImages" :key="img.id" class="thumb">
               <img :src="img.dataUrl" />
@@ -748,48 +764,24 @@ onUnmounted(() => {
             </select>
           </div>
 
-          <textarea
-            ref="textareaRef"
+          <TChatSender
             v-model="input"
-            class="chat-input"
+            class="chat-sender"
             placeholder="提问输入/ ⌥快捷命令，Enter 发送 / Shift+Enter 换行"
-            rows="1"
-            @paste="onPaste"
-            @input="autoResize"
-            @keydown.enter.exact.prevent="onSend"
-            @keydown.enter.shift.exact.prevent="insertNewline"
-          />
-
-          <div class="input-toolbar">
-            <div class="toolbar-left">
-              <button class="t-icon" title="附加图片" @click="fileInputRef?.click()">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                  <rect x="3" y="3" width="18" height="18" rx="2" />
-                  <circle cx="8.5" cy="8.5" r="1.5" />
-                  <path d="m21 15-5-5L5 21" />
-                </svg>
-              </button>
-              <input ref="fileInputRef" type="file" accept="image/*" multiple style="display:none" @change="onFilePicker" />
-
-              <button
-                class="t-icon"
-                title="用内置提示词增强当前输入"
-                :disabled="enhancing || !input.trim()"
-                @click="enhanceInput"
-              >
+            :loading="running"
+            :actions="senderActions"
+            :textarea-props="{ autosize: { minRows: 1, maxRows: 8 } }"
+            @send="onSend"
+            @stop="cancel"
+            @file-select="onSenderFileSelect"
+          >
+            <template #footer-prefix>
+              <button class="t-icon" title="用内置提示词增强当前输入" :disabled="enhancing || !input.trim()" @click="enhanceInput">
                 <span :class="{ 'spin-anim': enhancing }">✨</span>
               </button>
-
               <span class="model-pill" v-if="model !== '—'">{{ model }}</span>
-            </div>
-            <div class="toolbar-right">
-              <button class="t-icon send-btn" :disabled="!input.trim() && !attachedImages.length" title="发送 (Enter)" @click="onSend">
-                <svg viewBox="0 0 24 24" width="16" height="16" fill="none" stroke="currentColor" stroke-width="2">
-                  <path d="M5 12h14M13 5l7 7-7 7" />
-                </svg>
-              </button>
-            </div>
-          </div>
+            </template>
+          </TChatSender>
         </div>
       </div>
 
@@ -824,6 +816,18 @@ onUnmounted(() => {
       @select="onAskSelect"
       @custom="onAskCustom"
       @skip="onAskSkip"
+    />
+
+    <!-- 设置面板 -->
+    <SettingsPanel
+      v-if="settingsOpen"
+      :settings="settingsData as any"
+      :busy="settingsBusy"
+      @close="closeSettings"
+      @save-general="saveGeneralSettings"
+      @save-mcp="saveMcpConfig"
+      @reconnect-mcp="reconnectMcp"
+      @reload-config="reloadConfig"
     />
   </div>
 </template>

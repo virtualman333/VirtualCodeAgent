@@ -136,6 +136,12 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
   }
 
   private buildHtml(webview: vscode.Webview): string {
+    // 前端热更新: 设置了 VCA_WEB_DEV_URL 时, webview 直接加载 Vite dev server
+    const devUrl = (process.env.VCA_WEB_DEV_URL ?? "").trim().replace(/\/+$/, "");
+    if (devUrl) {
+      return this.buildDevHtml(devUrl);
+    }
+
     const distDir = getWebDistDir();
     const indexPath = path.join(distDir, "index.html");
     if (!fs.existsSync(indexPath)) {
@@ -170,5 +176,32 @@ export class ChatViewProvider implements vscode.WebviewViewProvider {
     );
 
     return html;
+  }
+
+  /** 前端热更新: 直接加载 Vite dev server 入口, 改 web 源码即时 HMR */
+  private buildDevHtml(devUrl: string): string {
+    const wsUrl = devUrl.replace(/^http/, "ws");
+    const csp = [
+      `default-src 'none'`,
+      `script-src ${devUrl} 'unsafe-inline'`,
+      `style-src ${devUrl} 'unsafe-inline'`,
+      `img-src ${devUrl} data:`,
+      `font-src ${devUrl} data:`,
+      `connect-src ${devUrl} ${wsUrl}`,
+    ].join("; ");
+    return `<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta http-equiv="Content-Security-Policy" content="${csp}" />
+  <title>VCA - Virtual Code Agent (dev)</title>
+</head>
+<body>
+  <div id="app"></div>
+  <script type="module" src="${devUrl}/@vite/client"></script>
+  <script type="module" src="${devUrl}/src/main.ts"></script>
+</body>
+</html>`;
   }
 }

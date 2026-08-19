@@ -5,9 +5,11 @@
  * 1. 复制 web/dist (Vue 构建产物) → vscode/dist/web (扩展包自包含)
  * 2. esbuild bundle vscode/src/extension.ts → vscode/dist/extension.js
  *
- * 用法: node scripts/build-extension.mjs
+ * 用法:
+ *   node scripts/build-extension.mjs           # 一次性构建
+ *   node scripts/build-extension.mjs --watch   # watch 模式, 改代码自动重建 (调试用)
  */
-import { build } from "esbuild";
+import { build, context } from "esbuild";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import fs from "node:fs";
@@ -17,6 +19,8 @@ const extDist = path.join(root, "vscode", "dist");
 const webDist = path.join(root, "web", "dist");
 const extWebDir = path.join(extDist, "web");
 const outfile = path.join(extDist, "extension.js");
+
+const isWatch = process.argv.includes("--watch");
 
 // ---- 1. 复制前端产物 ----
 if (!fs.existsSync(path.join(webDist, "index.html"))) {
@@ -28,7 +32,7 @@ fs.cpSync(webDist, extWebDir, { recursive: true });
 console.log(`[build-extension] 前端产物已复制 → vscode/dist/web`);
 
 // ---- 2. esbuild bundle ----
-await build({
+const buildOptions = {
   entryPoints: [path.join(root, "vscode", "src", "extension.ts")],
   outfile,
   bundle: true,
@@ -44,7 +48,22 @@ await build({
   loader: {
     ".node": "empty",
   },
-});
+};
 
-const size = (fs.statSync(outfile).size / 1024).toFixed(0);
-console.log(`[build-extension] 构建完成 → vscode/dist/extension.js (${size} KB)`);
+if (isWatch) {
+  const ctx = await context(buildOptions);
+  await ctx.watch({
+    onRebuild(err) {
+      if (err) {
+        console.error(`[build-extension] 重新构建失败: ${err.message}`);
+      } else {
+        console.log("[build-extension] 重新构建完成 → vscode/dist/extension.js");
+      }
+    },
+  });
+  console.log("[build-extension] watch 模式已启动，修改代码后自动重建 extension.js");
+} else {
+  await build(buildOptions);
+  const size = (fs.statSync(outfile).size / 1024).toFixed(0);
+  console.log(`[build-extension] 构建完成 → vscode/dist/extension.js (${size} KB)`);
+}

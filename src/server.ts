@@ -13,6 +13,13 @@ import { WebSocketServer, WebSocket } from "ws";
 import { Config, CONFIG_FILE } from "./config.js";
 import { AgentSession } from "./agent/session.js";
 import type { WebEvent } from "./agent/web_runner.js";
+import {
+  getSettingsView,
+  saveGeneralSettings,
+  saveMcpConfig,
+  reconnectMcp,
+  reloadConfig,
+} from "./settings.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const WEB_DIST = path.resolve(__dirname, "..", "web", "dist");
@@ -156,6 +163,51 @@ wss.on("connection", (ws) => {
         sessions.delete(s.id);
         emitTo(s.id)({ type: "session_closed", id: s.id });
       }
+      return;
+    }
+
+    // ---- 设置 (全局, 不依赖会话) ----
+    if (type === "get_settings") {
+      const sid = String(msg.session_id ?? first.id);
+      emitTo(sid)({ type: "settings", settings: getSettingsView() });
+      return;
+    }
+    if (type === "save_general_settings") {
+      const result = saveGeneralSettings((msg.updates as Record<string, unknown>) ?? {});
+      emitTo(first.id)({
+        type: "settings_result",
+        section: "general",
+        ok: result.ok,
+        error: result.error,
+        settings: getSettingsView(),
+      });
+      return;
+    }
+    if (type === "save_mcp_config") {
+      const servers = Array.isArray(msg.servers) ? msg.servers : [];
+      const result = saveMcpConfig(servers as Parameters<typeof saveMcpConfig>[0]);
+      if (result.ok) {
+        const status = await reconnectMcp();
+        emitTo(first.id)({ type: "settings_result", section: "mcp", ok: true, mcp_status: status, settings: getSettingsView() });
+      } else {
+        emitTo(first.id)({ type: "settings_result", section: "mcp", ok: false, error: result.error });
+      }
+      return;
+    }
+    if (type === "reconnect_mcp") {
+      const status = await reconnectMcp();
+      emitTo(first.id)({ type: "settings_result", section: "mcp", ok: true, mcp_status: status, settings: getSettingsView() });
+      return;
+    }
+    if (type === "reload_config") {
+      const result = reloadConfig();
+      emitTo(first.id)({
+        type: "settings_result",
+        section: "config",
+        ok: result.ok,
+        error: result.error,
+        settings: result.ok ? getSettingsView() : undefined,
+      });
       return;
     }
 

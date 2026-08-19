@@ -276,6 +276,11 @@ export class MCPManager {
     return this._connected;
   }
 
+  /** server 状态 Map (name → 状态文本) */
+  serverStatus(): Map<string, string> {
+    return new Map(this._serverStatus);
+  }
+
   statusText(): string {
     if (this._serverStatus.size === 0) {
       return (

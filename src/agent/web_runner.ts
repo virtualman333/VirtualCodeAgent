@@ -23,7 +23,7 @@ import type { AgentState, PendingQuestion } from "./state.js";
 import type { CodingAgent } from "./graph.js";
 
 export interface WebEvent {
-  type: "thinking" | "tool_call" | "tool_result" | "plan" | "final" | "ask_user" | "usage" | "info" | "running" | "workspace" | "external" | "model" | "models" | "context" | "enhance_presets" | "enhance_result" | "session_id" | "session_list" | "session_created" | "session_closed";
+  type: "thinking" | "tool_call" | "tool_result" | "plan" | "final" | "ask_user" | "usage" | "info" | "running" | "workspace" | "external" | "model" | "models" | "context" | "enhance_presets" | "enhance_result" | "session_id" | "session_list" | "session_created" | "session_closed" | "settings" | "settings_result";
   /** 事件所属会话 (多 tab 路由) */
   sessionId?: string;
   [key: string]: unknown;

@@ -191,6 +191,17 @@ export const Config = {
     saveFile(_config);
   },
 
+  /** 全量覆盖保存配置 (settings 面板使用) */
+  setAll(updates: VcaConfig): void {
+    _config = { ...updates };
+    saveFile(_config);
+  },
+
+  /** 重新从磁盘加载配置 (手改 config.json 后调用，无需重启进程) */
+  reload(): void {
+    _config = ensureConfig();
+  },
+
   // ---------- 多模型 ----------
 
   /** 模型配置列表。优先用 MODELS 数组，否则回退到单模型配置 */
