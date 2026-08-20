@@ -1,0 +1,50 @@
+{
+  "appId": "com.vca.desktop",
+  "productName": "VCA",
+  "directories": {
+    "buildResources": "electron/assets",
+    "output": "release"
+  },
+  "files": [
+    "electron/dist/**/*",
+    "dist-electron/**/*",
+    "dist/**/*",
+    "package.json"
+  ],
+  "extraResources": [
+    {
+      "from": "dist",
+      "to": "server",
+      "filter": ["server.js", "agent/**", "*.js"]
+    },
+    {
+      "from": "web/dist",
+      "to": "web"
+    }
+  ],
+  "win": {
+    "target": [
+      { "target": "nsis", "arch": ["x64"] },
+      { "target": "portable", "arch": ["x64"] }
+    ],
+    "artifactName": "${productName}-${version}-${arch}.${ext}"
+  },
+  "nsis": {
+    "oneClick": false,
+    "perMachine": false,
+    "allowToChangeInstallationDirectory": true,
+    "createDesktopShortcut": true,
+    "createStartMenuShortcut": true,
+    "shortcutName": "VCA"
+  },
+  "mac": {
+    "target": ["dmg", "zip"],
+    "category": "public.app-category.developer-tools"
+  },
+  "linux": {
+    "target": ["AppImage", "deb"],
+    "category": "Development"
+  },
+  "asar": true,
+  "asarUnpack": ["dist/server.js", "dist/agent/**"]
+}

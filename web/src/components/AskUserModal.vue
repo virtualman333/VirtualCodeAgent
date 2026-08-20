@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { ref } from "vue";
 import { Dialog as TDialog, Button as TButton, Input as TInput } from "tdesign-vue-next";
+import { ChatIcon } from "tdesign-icons-vue-next";
 
 const props = defineProps<{
   header: string;
@@ -41,11 +42,13 @@ function submitCustom(): void {
 <template>
   <TDialog
     :visible="true"
-    :header="`💬 ${header}`"
     width="480px"
     :footer="false"
     :close-on-overlay-click="false"
   >
+    <template #header>
+      <span class="dialog-header"><ChatIcon /> {{ header }}</span>
+    </template>
     <p class="q">{{ question }}</p>
 
     <div v-if="options.length" class="options">
@@ -85,6 +88,12 @@ function submitCustom(): void {
 </template>
 
 <style scoped>
+.dialog-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
 .q {
   margin-bottom: 16px;
   font-size: 14px;

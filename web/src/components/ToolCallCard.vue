@@ -1,5 +1,13 @@
 <script setup lang="ts">
 import { ref, computed } from "vue";
+import {
+  ArrowRightIcon,
+  FileIcon,
+  CheckCircleIcon,
+  LoadingIcon,
+  ChevronDownIcon,
+  ChevronRightIcon,
+} from "tdesign-icons-vue-next";
 
 const props = defineProps<{
   name: string;
@@ -49,16 +57,20 @@ function onOpenFile(): void {
   <div class="tool-card" :class="{ running, done: !running && result !== undefined }">
     <div class="tool-head" @click="expanded = !expanded">
       <span class="dot" />
-      <span class="tool-name">→ {{ name }}</span>
+      <span class="tool-name"><ArrowRightIcon class="tool-arrow" /> {{ name }}</span>
       <span class="tool-args">{{ argsText }}</span>
       <button
         v-if="showOpen && filePath && !running"
         class="open-btn"
         title="在编辑器中打开文件"
         @click.stop="onOpenFile"
-      >📄</button>
-      <span class="state">{{ running ? "运行中..." : "✓ 完成" }}</span>
-      <span class="chevron">{{ expanded ? "▾" : "▸" }}</span>
+      ><FileIcon /></button>
+      <span class="state">
+        <LoadingIcon v-if="running" class="spin" />
+        <CheckCircleIcon v-else />
+        {{ running ? "运行中..." : "完成" }}
+      </span>
+      <span class="chevron"><ChevronDownIcon v-if="expanded" /><ChevronRightIcon v-else /></span>
     </div>
     <div v-if="expanded && result !== undefined" class="tool-result">
       <pre>{{ resultPreview }}</pre>
@@ -112,6 +124,12 @@ function onOpenFile(): void {
   font-size: 13px;
   color: var(--cyan);
   white-space: nowrap;
+  display: inline-flex;
+  align-items: center;
+  gap: 2px;
+}
+.tool-arrow {
+  font-size: 12px;
 }
 .tool-args {
   font-size: 12px;
@@ -139,10 +157,23 @@ function onOpenFile(): void {
   font-size: 11px;
   color: var(--text-dim);
   flex-shrink: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+.state .spin {
+  animation: rotate 1s linear infinite;
+}
+@keyframes rotate {
+  to {
+    transform: rotate(360deg);
+  }
 }
 .chevron {
   color: var(--text-dim);
   font-size: 12px;
+  display: inline-flex;
+  align-items: center;
 }
 .tool-result {
   border-top: 1px solid var(--border);

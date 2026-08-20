@@ -26,6 +26,28 @@ export function isVscodeEnv(): boolean {
   );
 }
 
+export function isElectronEnv(): boolean {
+  return typeof (window as unknown as { vca?: { isElectron?: boolean } }).vca?.isElectron === true;
+}
+
+/**
+ * Electron 下用 IPC 打开文件 (VS Code 走 vscode 协议; 其他平台走系统默认)
+ * Web/VS Code 模式直接 send ws/postMessage `open_file`, 由 server 或扩展处理
+ */
+export async function openFileInExternalEditor(
+  filePath: string,
+  line?: number,
+  sendWs?: (p: Record<string, unknown>) => void
+): Promise<void> {
+  const w = window as unknown as { vca?: { openPath(p: string, l?: number): Promise<{ ok: boolean; error?: string }> } };
+  if (w.vca?.openPath) {
+    await w.vca.openPath(filePath, line);
+    return;
+  }
+  // Fallback: 通过 ws 通知 server (server 当前不处理, 仍保留接口供将来扩展)
+  sendWs?.({ type: "open_file", path: filePath, line: line ?? 0 });
+}
+
 // ============================================================
 // VS Code Webview transport
 // ============================================================

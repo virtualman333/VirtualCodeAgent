@@ -10,6 +10,7 @@ import {
   Select as TSelect,
   Option as TOption,
 } from "tdesign-vue-next";
+import { SettingIcon, DeleteIcon, AddIcon } from "tdesign-icons-vue-next";
 
 // ============================================================
 // 类型 (与后端 settings.ts 对齐)
@@ -147,13 +148,15 @@ const skillsCount = computed(() => props.settings?.skills.length ?? 0);
 <template>
   <TDialog
     :visible="true"
-    header="⚙️ 设置"
     width="760px"
     :footer="false"
     destroy-on-close
     @close="emit('close')"
     @overlay-click="emit('close')"
   >
+    <template #header>
+      <span class="dialog-header"><SettingIcon /> 设置</span>
+    </template>
     <TTabs v-model="activeSection" placement="left" class="settings-tabs">
       <!-- 通用 -->
       <TTabPanel value="general" label="通用">
@@ -267,7 +270,7 @@ const skillsCount = computed(() => props.settings?.skills.length ?? 0);
                   <TOption value="stdio" label="stdio" />
                   <TOption value="http" label="http" />
                 </TSelect>
-                <TButton variant="text" theme="danger" title="删除" @click="removeMcpServer(i)">×</TButton>
+                <TButton variant="text" theme="danger" title="删除" @click="removeMcpServer(i)"><DeleteIcon /></TButton>
               </div>
               <div class="mcp-row" v-if="s.transport === 'stdio'">
                 <TInput v-model="s.command" placeholder="command，如 npx" />
@@ -280,7 +283,7 @@ const skillsCount = computed(() => props.settings?.skills.length ?? 0);
           </div>
 
           <div class="actions">
-            <TButton variant="outline" @click="addMcpServer">＋ 添加 Server</TButton>
+            <TButton variant="outline" @click="addMcpServer"><AddIcon /> 添加 Server</TButton>
             <TButton variant="outline" :disabled="busy" @click="emit('reconnect-mcp')">重连</TButton>
             <TButton theme="primary" :loading="busy" @click="saveMcp">保存</TButton>
           </div>
@@ -291,6 +294,12 @@ const skillsCount = computed(() => props.settings?.skills.length ?? 0);
 </template>
 
 <style scoped>
+.dialog-header {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
 .settings-tabs {
   height: 62vh;
   max-height: 520px;

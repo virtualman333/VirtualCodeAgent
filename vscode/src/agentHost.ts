@@ -88,6 +88,20 @@ export class AgentHost {
   async handle(payload: Record<string, unknown>): Promise<void> {
     const type = String(payload.type ?? "");
     try {
+      // ---- 初始化握手: 前端 webview 就绪后主动拉取初始状态 ----
+      // (扩展侧构造时同步 emit 的事件可能因 webview 尚未加载而丢失)
+      if (type === "init") {
+        const s = [...this.sessions.values()][0];
+        if (s) {
+          this.emitWrapped({ type: "session_id", id: s.id, sessionId: s.id });
+          this.emitWrapped({ type: "workspace", path: s.state.workspace_dir, sessionId: s.id });
+          this.emitWrapped({ type: "models", models: s.getModels(), current: s.modelName, sessionId: s.id });
+          this.emitWrapped({ type: "model", name: s.modelName, sessionId: s.id });
+          this.emitWrapped({ type: "context", ...s.getContextInfo(), sessionId: s.id });
+        }
+        return;
+      }
+
       // ---- 会话管理 ----
       if (type === "new_session") {
         const s = this.createSession(this.workspaceDir);

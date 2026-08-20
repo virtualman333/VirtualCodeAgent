@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed } from "vue";
+import { ViewListIcon } from "tdesign-icons-vue-next";
 
 const props = defineProps<{ plan: string }>();
 
@@ -14,7 +15,7 @@ const steps = computed(() => {
 
 <template>
   <div class="panel">
-    <h3>📋 任务计划</h3>
+    <h3><ViewListIcon class="h3-icon" /> 任务计划</h3>
     <div v-if="steps.length === 0" style="font-size: 12px; color: var(--text-dim)">
       暂无计划（Agent 处理多步任务时会自动创建）
     </div>

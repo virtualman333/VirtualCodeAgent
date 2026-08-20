@@ -3,6 +3,19 @@ import { ref, nextTick, onMounted, onUnmounted, computed } from "vue";
 import { marked } from "marked";
 import DOMPurify from "dompurify";
 import { ChatList as TChatList, ChatSender as TChatSender } from "@tdesign-vue-next/chat";
+import { Select as TSelect } from "tdesign-vue-next";
+import {
+  AddIcon,
+  CloseIcon,
+  SettingIcon,
+  ControlPlatformIcon,
+  LightbulbIcon,
+  FolderIcon,
+  LinkIcon,
+  ImageIcon,
+  EditIcon,
+  ViewListIcon,
+} from "tdesign-icons-vue-next";
 import MsgBlock from "./components/MsgBlock.vue";
 import TodoPanel from "./components/TodoPanel.vue";
 import PlanList from "./components/PlanList.vue";
@@ -98,9 +111,15 @@ const workspace = ref("");
 const enhancing = ref(false);
 const chatListRef = ref<InstanceType<typeof TChatList> | null>(null);
 const senderRef = ref<InstanceType<typeof TChatSender> | null>(null);
+const fileInputRef = ref<HTMLInputElement | null>(null);
 
-/** ChatSender 操作区: 启用内置图片上传按钮 + 发送按钮 */
-const senderActions = [{ name: "uploadImage", uploadProps: { multiple: true, accept: "image/*" } }, "send"] as unknown[];
+/** 头像: 用户 / 助手 (info/usage 系统消息不显示头像) */
+const USER_AVATAR =
+  "data:image/svg+xml;charset=utf-8," +
+  encodeURIComponent(
+    '<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 40 40"><circle cx="20" cy="20" r="20" fill="#4c6ef5"/><circle cx="20" cy="15" r="7" fill="#ffffff"/><path d="M6 35c2.5-7.5 8-11 14-11s11.5 3.5 14 11z" fill="#ffffff"/></svg>'
+  );
+const ASSISTANT_AVATAR = "/logo-512.png";
 
 const isVscode = isVscodeEnv();
 
@@ -128,12 +147,19 @@ const plan = computed(() => activeTab.value?.plan ?? "");
 
 /** 映射为 TDesign ChatList 的消息数据 (自定义字段 msg 供 content 插槽渲染) */
 const chatData = computed(() =>
-  messages.value.map((m) => ({
-    role: m.kind === "user" ? "user" : "assistant",
-    msg: m,
-    content: [] as unknown[],
-  }))
+  messages.value.map((m) => {
+    if (m.kind === "user") return { role: "user", msg: m, content: [] as unknown[] };
+    // 系统信息/用量统计: 居中显示, 无头像
+    if (m.kind === "info" || m.kind === "usage") return { role: "system", msg: m, content: [] as unknown[] };
+    return { role: "assistant", msg: m, content: [] as unknown[] };
+  })
 );
+
+/** 模型下拉选项 */
+const modelOptions = computed(() => models.value.map((m) => ({ label: m.name, value: m.name })));
+
+/** 是否可发送 (有文字或已附加图片) */
+const canSend = computed(() => Boolean(input.value.trim()) || attachedImages.value.length > 0);
 const askPending = computed(() => activeTab.value?.askPending ?? null);
 
 function createTab(sessionId?: string, title = "新对话"): ChatTab {
@@ -299,11 +325,11 @@ function onSend(): void {
   requestAnimationFrame(focusInput);
 }
 
-/** ChatSender 内置图片上传按钮回调 */
-function onSenderFileSelect(e: unknown): void {
-  const detail = (e as { detail?: unknown })?.detail ?? e;
-  const files = (detail as { files?: File[] })?.files;
-  if (files && files.length) void handlePastedFiles(Array.from(files));
+function onFilePicker(ev: Event): void {
+  const files = (ev.target as HTMLInputElement).files;
+  if (!files) return;
+  void handlePastedFiles(Array.from(files));
+  (ev.target as HTMLInputElement).value = "";
 }
 
 function cancel(): void {
@@ -339,10 +365,10 @@ function onWorkspaceChange(ev: Event): void {
   transport?.send({ type: "workspace", path: val, session_id: tab.sessionId });
 }
 
-function switchModel(ev: Event): void {
+function switchModel(value: unknown): void {
   const tab = activeTab.value;
   if (!tab) return;
-  const name = (ev.target as HTMLSelectElement).value;
+  const name = String(value ?? "");
   if (!name || name === model.value) return;
   transport?.send({ type: "set_model", name, session_id: tab.sessionId });
 }
@@ -356,7 +382,7 @@ function enhanceInput(): void {
     return;
   }
   enhancing.value = true;
-  pushTo(tab, { kind: "info", content: "✨ 正在增强提示词..." });
+  pushTo(tab, { kind: "info", content: "正在增强提示词..." });
   transport?.send({ type: "enhance", input: current, session_id: tab.sessionId });
 }
 
@@ -456,6 +482,11 @@ function initTransport(): void {
     transport = createVscodeTransport(handleEvent);
     connected.value = true;
     createTab(); // 等待 session_id 事件绑定
+    // vscode 模式下扩展侧构造时同步 emit 的初始事件可能在 webview 就绪前丢失,
+    // 主动发一次握手, 让后端重发 session_id / models / model / context。
+    nextTick(() => {
+      transport?.send({ type: "init" });
+    });
     return;
   }
 
@@ -543,7 +574,7 @@ function handleEvent(e: ServerEvent): void {
     const tabForInfo = activeTab.value ?? tab;
     if (tabForInfo) {
       if (String(e.section ?? "") === "config") {
-        pushTo(tabForInfo, { kind: "info", content: e.ok ? "✅ 配置已重新加载" : `重载失败: ${String(e.error ?? "")}` });
+        pushTo(tabForInfo, { kind: "info", content: e.ok ? "配置已重新加载" : `重载失败: ${String(e.error ?? "")}` });
       } else if (e.ok) {
         pushTo(tabForInfo, { kind: "info", content: `设置已保存 (${String(e.section ?? "")})` });
       } else {
@@ -672,13 +703,13 @@ onUnmounted(() => {
       >
         <span class="tab-dot" v-if="t.running"></span>
         <span class="tab-title">{{ tabTitle(t) }}</span>
-        <span class="tab-close" @click.stop="closeTab(t.sessionId)">×</span>
+        <span class="tab-close" @click.stop="closeTab(t.sessionId)"><CloseIcon /></span>
       </div>
       <div class="tab tab-add" title="新建会话" @click="newTab">
-        <span>＋</span>
+        <AddIcon />
       </div>
       <div class="tab-actions">
-        <button class="settings-btn" title="设置" @click="openSettings">⚙️</button>
+        <button class="settings-btn" title="设置" @click="openSettings"><SettingIcon /></button>
         <span class="conn-status">
           <span class="dot" :class="{ on: connected }" />
           {{ connected ? "已连接" : "连接中..." }}
@@ -707,11 +738,27 @@ onUnmounted(() => {
               <div class="empty-name">VCA</div>
               <div class="empty-sub">Virtual Code Agent — 开始一次对话吧</div>
               <div class="empty-tips">
-                <div>📎 直接粘贴/拖入图片到输入框</div>
-                <div>⌨️ Enter 发送，Shift+Enter 换行</div>
-                <div>📋 在编辑器中选中文本，右键发送到 Agent</div>
+                <div class="empty-tip"><ImageIcon /> 直接粘贴/拖入图片到输入框</div>
+                <div class="empty-tip"><EditIcon /> Enter 发送，Shift+Enter 换行</div>
+                <div class="empty-tip"><ViewListIcon /> 在编辑器中选中文本，右键发送到 Agent</div>
               </div>
             </div>
+          </template>
+
+          <!-- 每条消息头像 -->
+          <template #avatar="{ item }">
+            <img
+              v-if="item.role === 'user'"
+              :src="USER_AVATAR"
+              class="chat-avatar chat-avatar--user"
+              alt=""
+            />
+            <img
+              v-else-if="item.role === 'assistant'"
+              :src="ASSISTANT_AVATAR"
+              class="chat-avatar chat-avatar--assistant"
+              alt=""
+            />
           </template>
 
           <!-- 每条消息自定义渲染 -->
@@ -730,7 +777,7 @@ onUnmounted(() => {
           <div v-if="attachedImages.length" class="attached-images">
             <div v-for="img in attachedImages" :key="img.id" class="thumb">
               <img :src="img.dataUrl" />
-              <button class="thumb-remove" @click="removeImage(img.id)" title="移除">×</button>
+              <button class="thumb-remove" @click="removeImage(img.id)" title="移除"><CloseIcon /></button>
             </div>
           </div>
 
@@ -753,15 +800,21 @@ onUnmounted(() => {
 
             <div class="spacer" />
 
-            <select
-              v-if="models.length > 1"
-              class="model-select"
-              :value="model"
-              :disabled="running"
-              @change="switchModel"
-            >
-              <option v-for="m in models" :key="m.name" :value="m.name">{{ m.name }}</option>
-            </select>
+            <div class="model-picker" title="切换模型">
+              <span class="model-picker__icon"><ControlPlatformIcon /></span>
+              <TSelect
+                v-if="models.length"
+                class="model-select"
+                :value="model"
+                :options="modelOptions as any"
+                :disabled="running"
+                placeholder="选择模型"
+                :borderless="true"
+                :popup-props="{ overlayClassName: 'model-popup' }"
+                @change="switchModel"
+              />
+              <span v-else class="model-select--empty">{{ model }}</span>
+            </div>
           </div>
 
           <TChatSender
@@ -769,17 +822,37 @@ onUnmounted(() => {
             class="chat-sender"
             placeholder="提问输入/ ⌥快捷命令，Enter 发送 / Shift+Enter 换行"
             :loading="running"
-            :actions="senderActions"
             :textarea-props="{ autosize: { minRows: 1, maxRows: 8 } }"
             @send="onSend"
             @stop="cancel"
-            @file-select="onSenderFileSelect"
           >
             <template #footer-prefix>
               <button class="t-icon" title="用内置提示词增强当前输入" :disabled="enhancing || !input.trim()" @click="enhanceInput">
-                <span :class="{ 'spin-anim': enhancing }">✨</span>
+                <LightbulbIcon :class="{ 'spin-anim': enhancing }" />
               </button>
-              <span class="model-pill" v-if="model !== '—'">{{ model }}</span>
+            </template>
+
+            <template #suffix>
+              <div class="sender-actions">
+                <button class="sender-icon" title="上传图片" @click="fileInputRef?.click()">
+                  <svg viewBox="0 0 24 24" width="18" height="18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="3" y="3" width="18" height="18" rx="2"/>
+                    <circle cx="8.5" cy="8.5" r="1.5"/>
+                    <path d="m21 15-5-5L5 21"/>
+                  </svg>
+                </button>
+                <input ref="fileInputRef" type="file" accept="image/*" multiple style="display:none" @change="onFilePicker" />
+                <button v-if="!running" class="sender-send" :disabled="!canSend" title="发送" @click="onSend">
+                  <svg viewBox="0 0 24 24" width="16" height="16" fill="currentColor">
+                    <path d="M3 20v-6l8-2-8-2V4l18 8z"/>
+                  </svg>
+                </button>
+                <button v-else class="sender-stop" title="停止" @click="cancel">
+                  <svg viewBox="0 0 24 24" width="14" height="14" fill="currentColor">
+                    <rect x="5" y="5" width="14" height="14" rx="2"/>
+                  </svg>
+                </button>
+              </div>
             </template>
           </TChatSender>
         </div>
@@ -789,14 +862,14 @@ onUnmounted(() => {
       <aside class="side">
         <TodoPanel :plan="plan" />
         <div class="panel">
-          <h3>📍 工作空间</h3>
+          <h3><FolderIcon class="h3-icon" /> 工作空间</h3>
           <div class="workspace-box">
             <div>{{ workspace || "默认" }}</div>
             <input placeholder="切换目录" @keydown.enter="onWorkspaceChange" />
           </div>
         </div>
         <div class="panel">
-          <h3>🔌 连接</h3>
+          <h3><LinkIcon class="h3-icon" /> 连接</h3>
           <div class="info-line">
             <span class="dot" :class="{ on: connected }" />
             <span>{{ connected ? "已连接" : "连接中..." }}</span>
