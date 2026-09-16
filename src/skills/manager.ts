@@ -44,7 +44,12 @@ export interface SkillConfig {
 // 发现与解析
 // ============================================================
 
-function getSkillDirs(): string[] {
+/**
+ * 技能扫描目录（用户级优先）。
+ * 导出出去给 CLI 用：`/skills` 里提示用户「把 SKILL.md 放哪儿」时，
+ * 必须和这里真正扫描的目录是同一份，否则提示的路径放进去也读不到。
+ */
+export function getSkillDirs(): string[] {
   const ws = getWorkspace();
   return [SKILLS_DIR, path.join(ws, ".vca", "skills"), path.join(ws, "skills")];
 }

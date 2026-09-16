@@ -188,14 +188,18 @@ export class MCPManager {
   private _serverStatus = new Map<string, string>();
   private _connected = false;
 
+  /**
+   * 读取 MCP 配置时实际会看的文件（用户级 + 项目级，后者覆盖前者）。
+   * 抽成方法是为了让 CLI 提示的路径与真正读取的路径永远一致 —— 两处手写必然漂移。
+   */
+  configFiles(): string[] {
+    return [MCP_CONFIG_FILE, path.join(getWorkspace(), ".vca", "mcp.json")];
+  }
+
   /** 读取 MCP 配置 (用户级 + 项目级, 后者覆盖前者) */
   loadConfig(): McpServer[] {
     const servers = new Map<string, McpServerConfig>();
-    const candidates = [
-      MCP_CONFIG_FILE,
-      path.join(getWorkspace(), ".vca", "mcp.json"),
-    ];
-    for (const file of candidates) {
+    for (const file of this.configFiles()) {
       try {
         if (!fs.existsSync(file)) continue;
         const data = JSON.parse(fs.readFileSync(file, "utf-8")) as {

@@ -15,7 +15,7 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 - **会话持久化**：对话自动保存，可随时 `/load` 恢复历史会话、切换工作空间。
 - **交互式打断**：执行过程中可用 `Ctrl+C` 中断；Agent 遇到歧义时通过 `ask_user` 向用户确认。
 - **多模型切换**：支持在 `config.json` 中配置多个模型并运行时切换（`/model`）。
-- **可扩展（规划中）**：Skills 专业技能（SKILL.md）与 MCP 外部工具接口已在架构中预留，TS 版正在接入。
+- **可扩展**：Skills 专业技能（`SKILL.md`，用户级 / 项目级目录都能发现）与 MCP 外部工具接口均已接入，Agent 侧通过 `list_skills` / `load_skill` 取用技能，MCP 工具在每轮对话时动态并入工具池。用 `/skills`、`/mcp` 查看实际发现到什么。
 
 ---
 
@@ -39,8 +39,8 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 ├── src/                 # TS 版核心 Agent
 │   ├── agent/           # 状态图编排 (graph)、会话、提示词、runner
 │   ├── tools/           # 内置工具：read / search / edit / write / bash / ask_user / plan
-│   ├── mcp/             # MCP 管理器（规划中）
-│   ├── skills/          # Skills 管理器（规划中）
+│   ├── mcp/             # MCP 管理器：读配置、连 server、收集动态工具
+│   ├── skills/          # Skills 管理器：发现 / 解析 / 加载 SKILL.md
 │   ├── config.ts        # 配置加载（~/.vca/config.json）
 │   ├── main.ts          # 控制台 CLI 入口
 │   ├── server.ts        # HTTP + WebSocket 服务（供 Web 使用）
@@ -104,6 +104,9 @@ npm run dev -- --list-workspaces     # 列出可用工作空间
 | `/workspace` | 显示当前工作空间 |
 | `/verbose` | 切换思考展开 / 折叠 |
 | `/todo` | 查看当前任务计划 |
+| `/skills` | 列出已发现的技能（含技能目录，方便自己放 `SKILL.md`） |
+| `/mcp` | 查看 MCP server 配置与连接状态 |
+| `/agents` | 子代理（**TS 版尚未接入**，Python 版见 `python_legacy/src/vca/subagents/`） |
 | `/config set K V` | 修改配置 |
 | `/model [名称\|序号]` | 查看 / 切换模型 |
 | `/save` `/load [序号]` `/history` | 保存 / 恢复 / 列出会话 |
@@ -156,9 +159,14 @@ build-vsix.bat        # 完整构建并打包 VSIX（Windows）
 }
 ```
 
-### MCP 配置（规划中）
+### MCP 配置
 
-架构已预留 MCP 管理器（`src/mcp/`），TS 版接入进行中。配置约定沿用项目级 `.vca/mcp.json` 或用户级 `~/.vca/mcp.json`：
+MCP 管理器（`src/mcp/`）会读下面两个文件里的 `servers` 段，项目级覆盖用户级；每轮对话前连接并收集工具，某个 server 连不上只记状态、不阻塞对话：
+
+- 用户级：`~/.vca/mcp.json`
+- 项目级：`<工作空间>/.vca/mcp.json`
+
+`/mcp` 会按实际状态报告：连上后列出每个 server 的状态与工具数；只是配了还没连（或连不上）也不会含糊地说「未配置」，而是把配置过的 server 与失败原因直接列出来。
 
 ```json
 {

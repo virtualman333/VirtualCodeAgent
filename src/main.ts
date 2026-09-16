@@ -4,6 +4,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 import { SystemMessage } from "@langchain/core/messages";
 
 import { Config, CONFIG_FILE, EDITABLE_KEYS, SESSIONS_DIR } from "./config.js";
@@ -26,6 +27,8 @@ import {
   magenta,
 } from "./ui.js";
 import { getCurrentPlan, formatPlan } from "./tools/index.js";
+import { getAllSkills, getSkillDirs } from "./skills/manager.js";
+import { mcpManager } from "./mcp/manager.js";
 
 // ============================================================
 // 命令行参数
@@ -86,6 +89,9 @@ function showHelp(verbose = false): void {
   print(`  ${cyan("/workspace")}  显示当前工作空间`);
   print(`  ${cyan("/verbose")}    切换思考展开/折叠`);
   print(`  ${cyan("/todo")}       查看当前任务计划`);
+  print(`  ${cyan("/skills")}     列出已发现的技能 (SKILL.md)`);
+  print(`  ${cyan("/mcp")}        查看 MCP server 配置与连接状态`);
+  print(`  ${cyan("/agents")}     子代理（TS 版尚未接入，见 python_legacy）`);
   print(`  ${cyan("/config")}     显示配置`);
   print(`  ${cyan("/config set K V")}  修改配置`);
   print(`  ${cyan("/model")}      查看/切换模型 (如 /model deepseek)`);
@@ -252,14 +258,49 @@ async function handleCommand(
       }
       break;
     }
-    case "/skills":
-      print(dim("TS 版暂未接入 Skills (规划中)"));
+    // 下面三条此前一律回答「暂未接入 (规划中)」，但 Skills 与 MCP 其实早已
+    // 实现并接进 Agent（SKILL_TOOLS 进了 ALL_TOOLS，mcpManager 在 createCodingAgent
+    // 里连接）—— 用户看到这句就不会去配 mcp.json、也不会去放 SKILL.md，
+    // 两个功能等于白做。现在一律从真实注册表/配置里读，不再手写结论。
+    case "/skills": {
+      const skills = getAllSkills();
+      if (skills.length === 0) {
+        print(dim("没发现技能。把一个 <名字>/SKILL.md 放进下面任一目录即可（重启后生效）:"));
+        for (const d of getSkillDirs()) print(dim(`  - ${d}`));
+      } else {
+        print(bold(`已发现 ${skills.length} 个技能:`));
+        for (const [i, s] of skills.entries()) {
+          print(`  ${cyan(String(i + 1))}. ${bold(s.name)} ${dim(`(${s.source})`)}`);
+          if (s.description) print(dim(`     ${s.description}`));
+        }
+        print(dim("Agent 需要时会自己用 list_skills / load_skill 取用"));
+      }
       break;
-    case "/mcp":
-      print(dim("TS 版暂未接入 MCP (规划中)"));
+    }
+    case "/mcp": {
+      const files = mcpManager.configFiles();
+      const configured = mcpManager.loadConfig();
+      // 注意不能用 isConnected 判：Agent 一启动就会尝试连接，即使一个 server 都没配，
+      // _connected 也会变成 true —— 那时 statusText() 只会说「未配置」，
+      // 而配置里明明写了 server，用户会以为改了没生效。所以按真实状态分三档。
+      const known = mcpManager.serverStatus();
+      if (known.size > 0) {
+        panel(mcpManager.statusText(), bold(magenta("🔌 MCP")), "magenta");
+      } else if (configured.length > 0) {
+        print(bold(`已配置 ${configured.length} 个 MCP server（尚未连接，首次对话时建立）:`));
+        for (const s of configured) {
+          print(`  - ${cyan(s.name)} ${dim(s.config.transport ?? "stdio")}`);
+        }
+        print(dim(`配置文件: ${files.join("  ·  ")}`));
+      } else {
+        print(dim("MCP servers 未配置。在下面任一文件里写好 servers 段再重启:"));
+        for (const f of files) print(dim(`  - ${f}`));
+      }
       break;
+    }
     case "/agents":
-      print(dim("TS 版暂未接入 SubAgent (规划中)"));
+      print(dim("TS 版还没有 SubAgent（Python 版有，见 python_legacy/src/vca/subagents/）。"));
+      print(dim("当前多步任务由主 Agent 自己拆解，用 /todo 看计划。"));
       break;
     case "/history": {
       const sessions = storage.listSessions(10);
@@ -468,7 +509,15 @@ process.on("unhandledRejection", (err) => {
   print(red(`[未处理的 Promise 异常] ${err}`));
 });
 
-if (import.meta.url === `file://${process.argv[1]?.replace(/\\/g, "/")}`) {
+// 只在被直接执行时启动 CLI（被 import 时不启动）。
+//
+// ⚠ 这里曾经是 `import.meta.url === \`file://${argv[1].replace(/\\/g,"/")}\``，
+// 在 Windows 上**永不成立**：盘符路径的 file URL 是 `file:///E:/x/main.ts`
+// （三个斜杠），手拼出来的是 `file://E:/x/main.ts`（两个），于是 main() 从不被调用，
+// `npm run dev` / `npm start` 一行输出都没有就退出。POSIX 下两者恰好相同，
+// 所以这个 bug 只在 Windows 上现形。pathToFileURL 会做完整规范化（含盘符、
+// 空格与中文的百分号编码），跨平台一致。
+if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
   main().catch((e) => {
     print(red(`[FATAL] ${e}`));
     process.exit(1);
