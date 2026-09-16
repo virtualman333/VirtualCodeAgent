@@ -15,7 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { blue, bold, clipToWidth, displayWidth, padRight, panel, stripAnsi } from "../src/ui.js";
+import { blue, bold, clipToWidth, cyan, dim, displayWidth, padRight, panel, renderMarkdown, stripAnsi, yellow } from "../src/ui.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -267,4 +267,188 @@ test("★ 结构锁: panel 的宽度只走 displayWidth，不得回到 stripAnsi
     "panel 里量宽度的调用少于 3 处 —— 可能有一处又改回按码元算了"
   );
   assert.ok(body.includes("clipToWidth("), "panel 不再截断超宽行 —— 窄终端里框会被折行顶散");
+});
+
+// ============================================================
+// ANSI 安全 —— 带颜色的字符串不能当纯文本做宽度运算
+// ============================================================
+//
+// 上面那一整套「按显示宽度」的口径，在**带颜色的行**上会整体失效：转义序列
+// 被当成一个个可见字符。这不是离题 —— `renderMarkdown` 输出给 `panel` 的
+// 内容**每一行都带颜色**（标题 cyan+bold、行内代码 cyan、加粗 bold），
+// 所以面板在窄终端里截断时必然踩到。实测修复前三种表现：
+//   ① `clipToWidth(cyan("a"×10), 6)` → `"\x1b[36m…"`
+//      —— 10 个字符**全被吃掉**，只留一个青色省略号
+//   ② 窄框下 break 落进序列内部 → `"\x1b[1m\x1b[3…"`
+//      —— 半个序列写进终端，终端把它当正文，会吞掉后面几个字符
+//   ③ 截断丢掉原文的 RESET → 颜色泄漏到省略号、框线乃至下一行
+//
+// 断言口径统一是：**把完整的 SGR 序列全部剥掉后，不得残留 `\x1b`**。
+// 残留即说明某个序列被切开了。（这条比「比对期望字符串」更抗重构 ——
+// 只要序列完整、宽度不超，中间怎么拼接都算通过。）
+
+/** 剥掉完整的 SGR 序列后仍残留转义字符 = 某个序列被拦腰切开 */
+function hasTornAnsi(s: string): boolean {
+  return s.replace(/\x1b\[[0-9;]*m/g, "").includes("\x1b");
+}
+
+test("clipToWidth: 没超上限时原样返回 —— 不给带颜色的行补多余的 RESET", () => {
+  const s = cyan("ab");
+  assert.equal(clipToWidth(s, 10), s, "没超就不该动内容（补 RESET 会让调用方拿到不一样的串）");
+});
+
+test("★ clipToWidth: 带颜色的长行不能把内容整条吃掉", () => {
+  const out = clipToWidth(cyan("a".repeat(10)), 6);
+  assert.equal(stripAnsi(out), "aaaaa…", "5 个字符 + 省略号（上限 6 列，给省略号留 1 列）");
+  assert.ok(displayWidth(out) <= 6, `实际宽度 ${displayWidth(out)} 超过 6`);
+  assert.equal(hasTornAnsi(out), false, `转义序列被切开：${JSON.stringify(out)}`);
+});
+
+test("★ 反证：逐字符算宽度的旧写法会把带颜色的行整条吃掉", () => {
+  // 复刻修复前的实现：对整个字符串 `for (const ch of s)`，转义序列的每个
+  // 字符（`\x1b` `[` `3` `6` `m`）都各算 1 列。这条不红就说明反证挑的样本不对。
+  const naive = (s: string, max: number): string => {
+    let width = 0;
+    let out = "";
+    for (const ch of s) {
+      width += displayWidth(ch);
+      if (width > max - 1) break;
+      out += ch;
+    }
+    return out + "…";
+  };
+  const bad = naive(cyan("a".repeat(10)), 6);
+  assert.equal(stripAnsi(bad), "…", "旧写法确实把 10 个字符全吃掉了（这就是修复前的形态）");
+  assert.notEqual(stripAnsi(clipToWidth(cyan("a".repeat(10)), 6)), "…", "新实现必须留下内容");
+});
+
+test("★ clipToWidth: 各种截断点都不切开转义序列", () => {
+  const samples = [
+    cyan("a".repeat(20)),
+    bold(cyan("中文标题很长的样子")),
+    yellow("x".repeat(30)) + "混合" + cyan("y".repeat(30)),
+  ];
+  for (const s of samples) {
+    for (const max of [2, 3, 5, 8, 13, 21]) {
+      const out = clipToWidth(s, max);
+      assert.equal(hasTornAnsi(out), false, `上限 ${max} 时切坏了序列：${JSON.stringify(out)}`);
+      assert.ok(displayWidth(out) <= max, `上限 ${max} 时给出宽度 ${displayWidth(out)}`);
+    }
+  }
+});
+
+test("clipToWidth: 截断点前补 RESET —— 颜色不泄漏给省略号与框线", () => {
+  const out = clipToWidth(yellow("x".repeat(30)), 7);
+  assert.equal(stripAnsi(out), "xxxxxx…");
+  assert.ok(
+    out.includes("\x1b[0m…"),
+    `截断点的省略号没有收尾 —— 终端里颜色会一直渗到方框边框和下一行：${JSON.stringify(out)}`
+  );
+  assert.equal(hasTornAnsi(out), false);
+});
+
+test("★ panel: 窄终端里截断带颜色的行，不切坏序列、不泄漏颜色", () => {
+  // 端到端：panel(renderMarkdown(...)) 是真实调用形态，Markdown 那侧每行都带颜色
+  const md = renderMarkdown("## " + "中文很长的标题内容".repeat(8));
+  assert.ok(md.includes("\x1b["), "renderMarkdown 的标题行应当带颜色，否则这条测不到 ANSI");
+  const lines = drawPanel(md, "标题", 30);
+  for (const l of lines) {
+    assert.equal(hasTornAnsi(l), false, `转义序列被切开：${JSON.stringify(l)}`);
+    assert.ok(displayWidth(l) <= 30, `超出终端宽度 30：${displayWidth(l)} | ${stripAnsi(l)}`);
+  }
+  assert.deepEqual(distinctWidths(lines), [displayWidth(lines[0])], widthReport(lines));
+  assert.ok(lines.some((l) => l.includes("…")), "超宽内容应被截断（否则这条没走到截断分支）");
+});
+
+// ============================================================
+// renderMarkdown —— 行内代码与加粗不能互相污染
+// ============================================================
+//
+// 原先分两次 replace：先渲染行内代码，再匹配加粗。第一次已经把 ANSI 序列
+// 写进了中间结果，第二次的正则照样会扫到 —— 于是**行内代码里的字面星号**
+// 被当成加粗标记。（写「加粗怎么写」的说明里，`**` 正是最常见的示例字符。）
+
+test("★ renderMarkdown: 反引号里的字面星号不加粗", () => {
+  const out = renderMarkdown("用 `**p**` 表示加粗");
+  assert.equal(out, `用 ${cyan("**p**")} 表示加粗`);
+  assert.equal(out.includes("\x1b[1m"), false, "行内代码里的 ** 被当成加粗标记了");
+});
+
+test("renderMarkdown: 行内代码里的 ** 也不加粗（命令 / 路径里常见）", () => {
+  const out = renderMarkdown("`npm run a**b**c` 这句不该有加粗");
+  assert.equal(out, `${cyan("npm run a**b**c")} 这句不该有加粗`);
+  assert.equal(out.includes("\x1b[1m"), false);
+});
+
+test("renderMarkdown: 真正的加粗与行内代码各归各", () => {
+  const out = renderMarkdown("**真的加粗** 与 `code` 各归各");
+  assert.equal(out, `${bold("真的加粗")} 与 ${cyan("code")} 各归各`);
+});
+
+test("renderMarkdown: 标题 / 代码块 / 普通行的基本形态不变", () => {
+  assert.equal(renderMarkdown("## 标题"), bold(cyan("标题")));
+  assert.equal(
+    renderMarkdown("```\nlet a = 1;\n```"),
+    dim("let a = 1;"),
+    "代码块整块 dim，且围栏行本身不输出"
+  );
+  assert.equal(renderMarkdown("普通一行"), "普通一行");
+  assert.equal(renderMarkdown(""), "");
+});
+
+// ============================================================
+// 结构锁 —— 扫源码前必须先剥注释
+// ============================================================
+//
+// 这一节读 `src/ui.ts` 的源码文本。踩过的坑：`clipToWidth` 里那条
+// 「为什么不能直接 `for (const ch of text)`」的**注释**，被锁当成了实现 ——
+// 于是锁在已经修好的代码上红了。在注释里写反面示例是好事，锁必须绕开它。
+
+/** 剥掉注释再扫（只够本文件用：ui.ts 的字符串里没有 `//`） */
+function stripComments(src: string): string {
+  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+}
+
+/** 取某个导出函数的函数体源码，已剥注释 */
+function functionBody(src: string, signature: string): string {
+  const start = src.indexOf(signature);
+  assert.ok(start >= 0, `找不到 ${signature} —— 改名了？这条锁需要跟着改`);
+  const next = src.indexOf("\nexport function", start + 1);
+  return stripComments(src.slice(start, next > start ? next : undefined));
+}
+
+test("★ 结构锁: renderMarkdown 的行内代码与加粗只扫一次", () => {
+  const body = functionBody(
+    fs.readFileSync(path.join(ROOT, "src", "ui.ts"), "utf-8"),
+    "export function renderMarkdown("
+  );
+  const WHY = "上一次 replace 插入的 ANSI 会被下一次当成正文（反引号里的 ** 会被加粗）";
+
+  // 唯一的正向判据：两个分支必须在同一条正则的交替里。
+  // **不数 `.replace(` 的个数** —— 标题分支自己也要 replace 一次，数量不是重点。
+  assert.ok(
+    body.includes("`[^`]+`|\\*\\*[^*]+\\*\\*"),
+    `行内代码与加粗必须写在同一条正则的交替分支里：${WHY}`
+  );
+  // 反向：一旦有人改回两次 replace，源码里就会出现「只匹配加粗」或「只匹配行内代码」的独立正则
+  assert.equal(body.includes("**([^*]+)**"), false, `又出现只匹配加粗的独立正则 —— ${WHY}`);
+  assert.equal(body.includes("`([^`]+)`"), false, `又出现只匹配行内代码的独立正则 —— ${WHY}`);
+});
+
+test("★ 结构锁: clipToWidth 必须按 SGR 切段，不得对整个字符串逐字符遍历", () => {
+  const body = functionBody(
+    fs.readFileSync(path.join(ROOT, "src", "ui.ts"), "utf-8"),
+    "export function clipToWidth("
+  );
+
+  assert.equal(
+    /for \(const ch of text\)/.test(body),
+    false,
+    "又对整个字符串逐字符遍历了 —— 转义序列会被按字符算宽度、还会被切开"
+  );
+  assert.ok(
+    /SGR_RE|x1b/.test(body),
+    "clipToWidth 里没有任何 ANSI 处理 —— 面板内容每行都带颜色，这样会把内容整条吃掉"
+  );
+  assert.ok(body.includes("matchAll("), "扫不出转义序列的位置，就没法保证不切开它");
 });

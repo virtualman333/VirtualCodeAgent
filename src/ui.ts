@@ -22,9 +22,17 @@ export function print(text = ""): void {
   process.stdout.write(text + "\n");
 }
 
+/**
+ * SGR 转义序列 —— 本仓库的颜色/样式全部由上面的 `esc()` 产出，形态只有这一种。
+ *
+ * 宽度计算、截断、Markdown 渲染都要按它切段：**转义序列占 0 列**，
+ * 而且永远不能被切开（切一半就是半个 `\x1b[3`，终端会把它当成正文吞掉后面的字符）。
+ */
+const SGR_RE = /\x1b\[[0-9;]*m/g;
+
 export function stripAnsi(s: string): string {
   // 简单去除 ANSI 序列 (用于宽度计算)
-  return s.replace(/\x1b\[[0-9;]*m/g, "");
+  return s.replace(SGR_RE, "");
 }
 
 /**
@@ -87,14 +95,43 @@ export function clipToWidth(s: string, max: number): string {
   const raw = Number.isFinite(max) ? Math.trunc(max) : 80;
   const limit = raw >= 2 ? raw : 80;
   if (displayWidth(text) <= limit) return text;
+
+  // 逐**段**拼接，不是逐字符：转义序列整段保留（占 0 列），可见字符才计宽度。
+  //
+  // 为什么不能直接 `for (const ch of text)`：那样转义序列的每个字符
+  // （`\x1b` `[` `3` `6` `m`）都会各算 1 列、还会被拆开。实测旧实现：
+  //   clipToWidth(cyan("a".repeat(10)), 6) → "\x1b[36m…"
+  // 10 个字符**全被吃掉**，只留一个青色省略号；更糟的是窄框下 break 会落在
+  // 序列中间（`"\x1b[1m\x1b[3…"`），把半个序列写进终端 —— 终端会把它当正文，
+  // 吞掉后面几个字符。本仓库的 Markdown 渲染**每行都带颜色**，所以 `panel`
+  // 在窄终端里截断时必然踩到。
   let width = 0;
   let out = "";
-  for (const ch of text) {
-    width += displayWidth(ch);
-    // 留一列给省略号本身，否则截断后反而比 max 还宽
-    if (width > limit - 1) break;
-    out += ch;
+  let sawAnsi = false;
+  let last = 0;
+
+  // 塞一个不含转义序列的片段；返回 true 表示预算已满、该收尾了
+  const takeVisible = (plain: string): boolean => {
+    for (const ch of plain) {
+      const w = displayWidth(ch);
+      // 留一列给省略号本身，否则截断后反而比 max 还宽
+      if (width + w > limit - 1) return true;
+      width += w;
+      out += ch;
+    }
+    return false;
+  };
+
+  for (const m of text.matchAll(SGR_RE)) {
+    const at = m.index ?? 0;
+    if (takeVisible(text.slice(last, at))) return out + (sawAnsi ? RESET : "") + "…";
+    out += m[0]; // 整段保留，宽度 0
+    sawAnsi = true;
+    last = at + m[0].length;
   }
+  if (takeVisible(text.slice(last))) return out + (sawAnsi ? RESET : "") + "…";
+  // 到这里说明可见宽度没超预算 —— 与开头的判断矛盾，只可能是宽度表变了。
+  // 不抛：宁可多给一个省略号，也不要让一句话把整个面板打断。
   return out + "…";
 }
 
@@ -175,9 +212,16 @@ export function renderMarkdown(text: string): string {
       out.push(bold(cyan(line.replace(/^#{1,6}\s/, ""))));
       continue;
     }
-    // 行内代码 + 加粗
-    let rendered = line.replace(/`([^`]+)`/g, (_, code: string) => cyan(code));
-    rendered = rendered.replace(/\*\*([^*]+)\*\*/g, (_, t: string) => bold(t));
+    // 行内代码 + 加粗：**一次扫描**，用同一条正则的交替分支，谁先出现就处理谁。
+    //
+    // 不能写成两次 replace（踩过）：第一次替换会把 ANSI 序列写进中间结果，
+    // 第二次的正则再扫一遍时，就把**行内代码里的字面星号**也当成加粗标记了 ——
+    // `` 用 `**p**` 表示加粗 `` 里的 `**p**` 会变成「加粗的 p」，
+    // 而它明明写在反引号里、本该原样显示；`` `a**b**c` `` 同理。
+    const rendered = line.replace(
+      /`[^`]+`|\*\*[^*]+\*\*/g,
+      (m: string) => (m.startsWith("`") ? cyan(m.slice(1, -1)) : bold(m.slice(2, -2)))
+    );
     out.push(rendered);
   }
   return out.join("\n");
