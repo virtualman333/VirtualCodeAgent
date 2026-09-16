@@ -315,8 +315,8 @@ npm run check         # typecheck:test + test
 
 ## 版本
 
-- 当前核心版本：**0.2.0**（TypeScript 重写版）
-- VS Code 扩展已打包：`vscode/vca-coding-agent-0.1.2.vsix`
+- 当前核心版本：**0.3.0**（TypeScript 重写版）
+- VS Code 扩展**独立发版**，打包产物在 `vscode/vca-coding-agent-<版本>.vsix`，版本号见 `vscode/package.json` —— 这里不抄具体数字（抄一份必然漂移：此前这里写着 `0.1.2`，而仓库里根本没有那个文件）
 - `python_legacy/` 为早期 Python 实现，已弃用，仅保留作参考。
 
 ---

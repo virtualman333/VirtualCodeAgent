@@ -1,6 +1,6 @@
 {
   "name": "virtual-code-agent",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Virtual Code Agent - LangGraph.js 驱动的编码 Agent（TS 重写版）",
   "type": "module",
   "bin": {
