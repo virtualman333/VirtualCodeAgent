@@ -4,9 +4,10 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL, fileURLToPath } from "node:url";
+import { pathToFileURL } from "node:url";
 import { SystemMessage } from "@langchain/core/messages";
 
+import { readVersion } from "./version.js";
 import { Config, CONFIG_FILE, EDITABLE_KEYS, INPUT_HISTORY_FILE } from "./config.js";
 import { CodingAgent, createCodingAgent, makeSystemPrompt } from "./agent/graph.js";
 import { createInitialState, type AgentState } from "./agent/state.js";
@@ -433,17 +434,6 @@ function formatPrompt(workspaceDir: string, windowNo: number, verbose: boolean):
   const base = path.basename(workspaceDir) || workspaceDir;
   const mode = verbose ? " 📖" : "";
   return `${cyan(`vca:${base}`)}${dim(` #${windowNo}${mode}`)}> `;
-}
-
-/** 版本号从 package.json 现场读 —— 不在源码里再抄一份（抄一份必然漂移） */
-function readVersion(): string {
-  try {
-    const pkg = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
-    const raw = JSON.parse(fs.readFileSync(pkg, "utf-8")) as { version?: unknown };
-    return typeof raw.version === "string" && raw.version ? raw.version : "unknown";
-  } catch {
-    return "unknown";
-  }
 }
 
 async function main(): Promise<void> {

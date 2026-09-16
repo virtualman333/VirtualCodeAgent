@@ -48,11 +48,12 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 │   ├── help.ts          # 斜杠命令清单（单一来源，/help 由它渲染）
 │   ├── completer.ts     # Tab 补全（纯函数：一行输入 → 候选 + 待替换的 token）
 │   ├── input-history.ts # ↑/↓ 输入历史（读写 ~/.vca/input_history）
-│   ├── ui.ts            # ANSI 颜色 / 面板 / 显示宽度
+│   ├── ui.ts            # ANSI 颜色 / 面板 / 显示宽度 / Markdown 渲染
+│   ├── version.ts       # 版本号读取（唯一来源是 package.json，源码里不抄第二份）
 │   ├── main.ts          # 控制台 CLI 入口
 │   ├── server.ts        # HTTP + WebSocket 服务（供 Web 使用）
 │   └── workspace*.ts    # 工作空间选择与管理
-├── tests/               # 测试：cli-args / help / completer / input-history / ui（纯函数）
+├── tests/               # 测试：cli-args / help / completer / input-history / ui / version（纯函数）
 │                        #       + cli-spawn（真的起子进程，含启动面板对齐）
 ├── vscode/              # VS Code 扩展（聊天面板、AskUser 弹窗、工具调用流式展示）
 ├── web/                 # 独立 Web 聊天前端（Vue 3 + Vite）
@@ -303,7 +304,7 @@ npm run check         # typecheck:test + test
 
 测试分两层：
 
-- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` / `tests/ui.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则、控制台宽度的口径（`panel` 每一行的显示宽度只有一个值、窄终端才截断、`📋` 算 2 列而 `⚡` 算 1 列）、Markdown 表格（中文列也对齐、已经对齐的表格再渲染一遍不再变、带竖线的命令行不会被吃成表格、`\|` 不被当成分隔符）。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据。
+- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` / `tests/ui.test.ts` / `tests/version.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则、控制台宽度的口径（`panel` 每一行的显示宽度只有一个值、窄终端才截断、`📋` 算 2 列而 `⚡` 算 1 列）、Markdown 表格（中文列也对齐、已经对齐的表格再渲染一遍不再变、带竖线的命令行不会被吃成表格、`\|` 不被当成分隔符）、版本号只有一个读取处。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据。
 - `tests/cli-spawn.test.ts` —— 入口冒烟层。**真的把 CLI 当子进程跑起来**，断言 stdout / stderr / 退出码。这一层存在的理由：上一轮那个「入口守卫在 Windows 上永不成立、`npm run dev` 一行输出都没有」的故障，在所有纯函数测试里都是绿的 —— 被测函数一个都没被调用。判据很朴素：**stdout 是空的就说明 `main()` 压根没跑**。启动面板的对齐也量在这里：喂假数据量不出「终端列数 + 真实内容」组合出来的宽度。
 
 至于 `↑` 与 `Tab` 这类**真终端按键行为**，不在自动化范围内：用管道喂 stdin 能验到「历史被正确读写、命令正常执行」，按键本身需要 TTY，只能本地手工过一遍。

@@ -31,6 +31,7 @@ import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 
+import { readVersion } from "../version.js";
 import { MCP_CONFIG_FILE } from "../config.js";
 import { getWorkspace } from "../workspace_ctx.js";
 
@@ -106,7 +107,7 @@ function inferType(schema: Record<string, unknown>): string {
 async function createClient(server: McpServer): Promise<{ client: Client; close: () => Promise<void> }> {
   const cfg = server.config;
   const client = new Client(
-    { name: "vca", version: "0.2.0" },
+    { name: "vca", version: readVersion() },
     { capabilities: {} }
   );
 
