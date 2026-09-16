@@ -519,18 +519,134 @@ test("★ renderMarkdown: 表格单元格的行内代码 / 加粗与正文同一
   assert.ok(colored.includes(bold("必填")), "单元格里的加粗应当加粗");
 });
 
-test("renderMarkdown: 表格里的 \\| 是转义过的竖线，不该把一格切成两格", () => {
+test("★ renderMarkdown: 表格里的 \\| 转义回去写成 \\| —— 能原样读回来，不是丢掉", () => {
   const md = ["| 表达式 | 含义 |", "|---|---|", "| a \\| b | 或 |"].join("\n");
-  const lines = renderMarkdown(md).split("\n");
+  const lines = renderMarkdown(md, Infinity).split("\n");
   const bare = stripAnsi(lines[2]);
-  assert.ok(bare.includes("a | b"), `转义的竖线应当还原成竖线本身：${JSON.stringify(bare)}`);
-  // 表头 3 个边界竖线，数据行只该多出「格内那一个字面竖线」= 4。
-  // 不处理转义的话这里会等于 3，同时格数从 2 变 3 —— 「或」会被挤到不存在的列里静默丢掉。
+  assert.ok(bare.includes("a \\| b"), `格内竖线应当保留转义形态：${JSON.stringify(bare)}`);
+  // 表头 3 个边界竖线；格内那个竖线**必须是转义过的**，不能变成第 4 个边界。
+  // 不转义的话这里会等于 4，同时格数从 2 变 3 ——「或」会被挤到不存在的列里静默丢掉。
+  //
+  // 判据前先把 `\|` 摘掉：转义后的竖线在**视觉上**仍是竖线，直接数 `|`
+  // 两种实现都是 4 个，等于没测。摘掉之后剩下的才是真正的列边界。
   assert.equal(
-    barCols(bare).length,
-    barCols(stripAnsi(lines[0])).length + 1,
-    `格数变了：转义的竖线被当成列分隔符 —— ${JSON.stringify(bare)}`
+    barCols(bare.replace(/\\\|/g, "")).length,
+    barCols(stripAnsi(lines[0])).length,
+    `转义的竖线被当成了列分隔符 —— ${JSON.stringify(bare)}`
   );
+
+  // 真正的判据：契约写着「输出仍是合法 Markdown 表格」，那就得能读回来。
+  // 旧实现输出的是裸 `|`，再解析时 2 列变 3 列、「或」整格消失（实测），
+  // 而上面那条 `includes` 断言当时照样是绿的 —— 所以这里必须真回读一遍。
+  const again = renderMarkdownTable(stripAnsi(lines.join("\n")).split("\n"), Infinity);
+  assert.notEqual(again, null, "自己渲染出来的表格自己认不出来");
+  assert.equal(stripAnsi(again!.join("\n")), stripAnsi(lines.join("\n")), "含竖线的单元格再渲染一遍变了");
+});
+
+// ============================================================
+// 表格宽度 —— 「已对齐」不等于「装得下」
+// ============================================================
+//
+// 上一轮把表格做了列对齐，但只解决了「竖线落在同一列」，没解决「这张表有多宽」。
+// 真实形态是 `panel(renderMarkdown(回答), 标题)`：`panel` 的宽度上限是
+// `min(终端列数, 100)`，装不下时它**只能按行截断** —— 于是超宽表格最右边那几列
+// 连同右边框一起被 `…` 吃掉，而 `renderMarkdown` 那边全程不知道有这回事，
+// 谁都不会报错。实测一张三列中文表在 80 列终端里是 111 列宽。
+
+const WIDE_TABLE_MD = [
+  "| 字段名 | 类型 | 说明 |",
+  "|---|---|---|",
+  "| componentDidMount | function | 这是一个非常长的说明文字，用来把表格撑得远远超过 80 列宽 |",
+  "| onUpdate | function | 短说明 |",
+].join("\n");
+
+test("★ renderMarkdownTable: 给了 maxWidth 就必须装得下（超宽表格不再顶穿面板）", () => {
+  const rows = renderMarkdownTable(WIDE_TABLE_MD.split("\n"), 40);
+  assert.notEqual(rows, null);
+  const lines = rows!;
+  assert.deepEqual(
+    distinctWidths(lines),
+    [displayWidth(lines[0])],
+    `收窄后各行宽度不一致：\n${widthReport(lines)}`
+  );
+  assert.ok(displayWidth(lines[0]) <= 40, `上限 40 却给了 ${displayWidth(lines[0])} 列`);
+  // 竖线仍要对齐 —— 截断之后不重新补白的话，后面几列会整体左移
+  assert.deepEqual(barCols(lines[2]), barCols(lines[0]), `收窄后竖线没对齐：\n${widthReport(lines)}`);
+});
+
+test("★ renderMarkdownTable: 收窄是「每列都截一点」，不是把右边的列整列丢掉", () => {
+  const lines = renderMarkdownTable(WIDE_TABLE_MD.split("\n"), 40)!;
+  // 三列 + 4 条边界竖线。旧行为（不设上限）下，越界部分由 panel 按行切掉，
+  // 第 3 列的尾部和右边框一起消失 —— 这里是「列还在不在」的直接判据。
+  assert.equal(barCols(lines[0]).length, 4, `列数变了：${JSON.stringify(stripAnsi(lines[0]))}`);
+  for (const l of lines) {
+    assert.equal(barCols(l).length, 4, `某一行少了列：${JSON.stringify(stripAnsi(l))}`);
+    assert.ok(l.trimEnd().endsWith("|"), `右边框被吃掉了：${JSON.stringify(stripAnsi(l))}`);
+  }
+  // 内容确实是被截短而不是被原样透传
+  assert.ok(stripAnsi(lines[2]).includes("…"), `超宽单元格应当被截断：${JSON.stringify(stripAnsi(lines[2]))}`);
+  assert.equal(stripAnsi(lines[3]).includes("…"), false, "装得下的短行不该被截");
+});
+
+test("★ renderMarkdown: 端到端 —— panel(renderMarkdown(超宽表)) 右边框不被顶出去", () => {
+  // 真实调用形态。renderMarkdown 按**面板内容宽**（终端列数 − 4 列边框）排表，
+  // 再交给 panel；两者宽度口径必须对得上，否则 panel 会再截一刀。
+  const cols = 60;
+  const table = renderMarkdown(WIDE_TABLE_MD, cols - 4).split("\n");
+  const lines = drawPanel(table.join("\n"), "回答", cols);
+
+  assert.deepEqual(
+    distinctWidths(lines),
+    [displayWidth(lines[0])],
+    `面板行宽不一致（表格顶穿了右边框）：\n${widthReport(lines)}`
+  );
+  for (const l of lines) {
+    assert.ok(displayWidth(l) <= cols, `超出终端宽度 ${cols}：${displayWidth(l)} | ${stripAnsi(l)}`);
+  }
+
+  // 最强判据：把边框剥掉，面板里的内容必须与表格**逐字节相同**。
+  // panel 装不下时是按行 clipToWidth 的（尾部成 `…`），对不上就说明又截了一刀。
+  const inner = lines.slice(1, -1).map((l) => stripAnsi(l).slice(2, -2));
+  assert.deepEqual(inner, table.map(stripAnsi), `表格在 panel 里被二次截断了：\n${widthReport(lines)}`);
+});
+
+test("renderMarkdownTable: maxWidth 够宽 / 不设上限时，结果逐字节相同", () => {
+  const natural = renderMarkdownTable(WIDE_TABLE_MD.split("\n"), 0)!;
+  assert.deepEqual(renderMarkdownTable(WIDE_TABLE_MD.split("\n"), Infinity), natural, "Infinity 应当等于不设上限");
+  assert.deepEqual(renderMarkdownTable(WIDE_TABLE_MD.split("\n"), 500), natural, "装得下就不该动它");
+  assert.equal(displayWidth(natural[0]) > 500, false);
+});
+
+test("renderMarkdownTable: 每列 3 列宽都放不下时返回 null（不吐一张变形的表）", () => {
+  // 5 列 × (3 列内容 + 3 列分隔) + 1 = 31 列是最低开销，10 列无论如何放不下
+  const five = [
+    "| a | b | c | d | e |",
+    "|---|---|---|---|---|",
+    "| 1 | 2 | 3 | 4 | 5 |",
+  ].join("\n");
+  assert.equal(renderMarkdownTable(five.split("\n"), 10), null, "装不下应当返回 null，由调用方原样输出");
+  assert.notEqual(renderMarkdownTable(five.split("\n"), 31), null, "刚好放得下就该渲染");
+  assert.notEqual(renderMarkdownTable(five.split("\n"), 0), null, "不设上限不受这条限制");
+  // 26 列：单列只剩 2 列。2 列的单元格只能塞一个 `…`，等于把这一列整个吃掉 ——
+  // 与其给一张「表在、内容不在」的东西，不如退回原样输出（MIN_CELL = 3）。
+  // 这里必须用**内容够宽**的表：上面那张单字符表在 26 列下本来就装得下，
+  // 压根走不到压宽度那条路，断言会变成「永远为真」的假锁。
+  const wide5 = [
+    "| aaaaaaaa | bbbbbbbb | cccccccc | dddddddd | eeeeeeee |",
+    "|---|---|---|---|---|",
+    "| 11111111 | 22222222 | 33333333 | 44444444 | 55555555 |",
+  ].join("\n");
+  assert.notEqual(renderMarkdownTable(wide5.split("\n"), 31), null, "每列刚好 3 列宽，应当渲染");
+  assert.equal(renderMarkdownTable(wide5.split("\n"), 26), null, "每列不足 3 列就该放弃，而不是挤出一列宽的单元格");
+});
+
+test("★ renderMarkdownTable: 压到最窄时每列仍在（清空整个表比变形更糟）", () => {
+  const rows = renderMarkdownTable(WIDE_TABLE_MD.split("\n"), 31)!;
+  assert.notEqual(rows, null);
+  for (const l of rows) {
+    assert.equal(barCols(l).length, 4, `最窄情况下丢了列：${JSON.stringify(stripAnsi(l))}`);
+    assert.ok(displayWidth(l) <= 31, `上限 31 却给了 ${displayWidth(l)} 列`);
+  }
 });
 
 test("renderMarkdown: 空单元格与尾随空格不破坏对齐", () => {
@@ -611,6 +727,30 @@ test("★ 结构锁: 表格列宽按显示宽度算，且不再有第二套 Mark
   // 新增第二个（比如给表格单独开一个）必然漂移。
   const entries = src.match(/export function render\w*\(\s*text:/g) ?? [];
   assert.deepEqual(entries, ["export function renderMarkdown(text:"], `markdown 渲染入口多了一个：${entries}`);
+});
+
+test("★ 结构锁: 终端宽度上限只定义一份 —— panel 画框与表格排宽必须同一口径", () => {
+  const src = fs.readFileSync(path.join(ROOT, "src", "ui.ts"), "utf-8");
+  // 踩过：panel 用 `min(termWidth, 100)`、表格另算一套 120 列 —— 表格右边那截
+  // 直接跑到框外面，且不报错。这条锁盯的就是「两处各写一份宽度口径」。
+  const reads = src.match(/process\.stdout\.columns/g) ?? [];
+  assert.equal(
+    reads.length,
+    1,
+    `读终端列数的地方有 ${reads.length} 处，必须收敛到 termWidth() 一处：${reads.join(" / ")}`
+  );
+  const panel = functionBody(src, "export function panel(");
+  assert.equal(
+    /process\.stdout\.columns/.test(panel),
+    false,
+    "panel 里又自己读了一次 stdout.columns —— 应当走 termWidth()"
+  );
+  // 表格那侧：renderMarkdown 必须把宽度**传下去**，自己不能悄悄按绝对列宽排
+  const md = functionBody(src, "export function renderMarkdown(");
+  assert.ok(
+    /renderMarkdownTable\(\s*[\s\S]*?maxWidth\s*\)/.test(md),
+    "renderMarkdown 没把宽度上限传给 renderMarkdownTable —— 超宽表会顶穿面板"
+  );
 });
 
 test("★ 结构锁: clipToWidth 必须按 SGR 切段，不得对整个字符串逐字符遍历", () => {

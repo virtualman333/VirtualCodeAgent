@@ -140,6 +140,22 @@ export function clipToWidth(s: string, max: number): string {
 // ============================================================
 
 /**
+ * 终端可用宽度（列），上限 100。
+ *
+ * 「上限 100」**只此一处**定义：`panel` 画框、`renderMarkdown` 给表格排宽都要用，
+ * 各写一份的话（踩过），表格会按 120 列排、方框按 100 列画 —— 表格右边那截
+ * 直接跑到框外面去，而且不报错。
+ */
+function termWidth(): number {
+  return Math.min((process.stdout.columns ?? 80) || 80, 100);
+}
+
+/** 面板**内容**的可用宽度（扣掉 `│ ` 与 ` │` 共 4 列）—— 表格据此决定要不要换行 */
+function panelInnerWidth(): number {
+  return Math.max(0, termWidth() - 4);
+}
+
+/**
  * 画一个带标题的方框。
  *
  * **宽度一律按显示宽度算，不按码元。** 这里踩过：原先用的是
@@ -160,7 +176,6 @@ export function panel(content: string, title?: string, borderStyle: "green" | "b
     borderStyle === "magenta" ? magenta :
     borderStyle === "red" ? red : blue;
 
-  const termWidth = (process.stdout.columns ?? 80) || 80;
   const lines = String(content ?? "").split("\n");
   const titleText = title ? String(title) : "";
 
@@ -168,7 +183,7 @@ export function panel(content: string, title?: string, borderStyle: "green" | "b
   const titleW = titleText ? displayWidth(titleText) : 0;
   const required = Math.max(contentW + 4, titleText ? titleW + 5 : 0, 20);
   // 上限只用来兜住异常宽的终端；真到了装不下的程度，宁可折行也不要一个参差的框
-  const width = Math.min(required, Math.min(termWidth, 100));
+  const width = Math.min(required, termWidth());
   const inner = Math.max(0, width - 4);
 
   if (titleText) {
@@ -239,6 +254,71 @@ function padCell(text: string, width: number, align: ColAlign): string {
 }
 
 /**
+ * 单元格里出现字面 `|` 时必须**再转义回去**写成 `\|`，否则这条输出读不回来。
+ *
+ * 踩过：`| a \| b | 或 |` 渲染出来的那一行是 `| a | b  | 或   |` —— 看着对齐，
+ * 但格内那个裸 `|` 已经不是「内容」而是「列分隔符」了：粘回 Markdown 再解析，
+ * 2 列变 3 列，「或」被挤到不存在的列里**静默丢掉**（实测）。
+ * 本函数的契约写明了「输出仍是合法 Markdown 表格」，那就得连这一条也守住。
+ *
+ * 必须在**算列宽之前**转义：先算宽再转义的话，`\|` 比 `|` 多占 1 列、
+ * 补的白少了一格，列当场就歪；而且第二遍渲染时宽度会再变一次，永远不收敛。
+ */
+function escapeCell(text: string): string {
+  return text.replace(/\|/g, "\\|");
+}
+
+/**
+ * 单元格最小列宽。
+ *
+ * 3 是两头夹出来的：分隔行的 `---` 是 GFM 的下限，再窄就不是表了；
+ * 而 `clipToWidth` 对 < 2 的上限会退回兜底值 80（那条分支是为了「1 列连省略号
+ * 都放不下」），列宽给到 1 或 2，截断会整个失效、或者只剩一个光秃秃的「…」，
+ * 等于把这一列吃掉。取 3，`ab…` 刚好还留得下两个字。
+ */
+const MIN_CELL = 3;
+
+/**
+ * 把「按内容算出来的绝对列宽」压进 `maxWidth` 以内。
+ *
+ * 削法是**从当前最宽的那列往下削**（水位线），不是按内容占比等比缩。
+ * 等比缩看着合理，实测很难看：`17/8/62` 三列在 40 列预算下缩成 `5/3/22`，
+ * `onUpdate`（8 列）这种**本来装得下**的短内容也被截成 `onUpd…`，
+ * 而真正撑爆的那一列照样放不下 —— 两头都亏。从最宽的削，最后各列宽度接近，
+ * 短内容能保住（同一组数据给到 `11/8/11`，`onUpdate` 与 `function` 都完整）。
+ *
+ * @param natural 按内容算出的自然列宽
+ * @param maxWidth 结果每行的显示宽度上限；`<= 0` 表示不设上限
+ * @returns 每列宽度；装得下（或不设上限）时是 `natural` 的副本；
+ *          连每列 `MIN_CELL` 都放不下时返回 `null` —— 由调用方原样输出。
+ *          硬压到装下只会得到一张竖线错位、内容全成省略号的「表」，那不叫渲染。
+ */
+function fitWidths(natural: readonly number[], maxWidth: number, cols: number): number[] | null {
+  const sum = natural.reduce((a, b) => a + b, 0);
+  // 每行的固定开销：`| ` + ` |` 两组共 4 列，格与格之间每个 ` | ` 3 列
+  const overhead = 3 * cols + 1;
+  if (!(maxWidth > 0) || sum + overhead <= maxWidth) return [...natural];
+
+  const budget = maxWidth - overhead;
+  if (budget < MIN_CELL * cols) return null;
+
+  const out = [...natural];
+  let used = sum;
+  // 每次只削 1 列 —— 这样 used 必然**恰好**落到 budget（不会削过头再补回来），
+  // 也就不需要「余量再分配」那半段逻辑。列数 × 列宽的量级，不心疼。
+  while (used > budget) {
+    let k = -1;
+    for (let i = 0; i < cols; i++) if (out[i] > MIN_CELL && (k < 0 || out[i] > out[k])) k = i;
+    // 走不到：budget ≥ MIN_CELL × cols 时，全列都被压到 MIN_CELL 就意味着
+    // used = budget，循环已经退出了。留着是防将来有人改掉上面那个判断。
+    if (k < 0) return null;
+    out[k]--;
+    used--;
+  }
+  return out;
+}
+
+/**
  * 把一块 Markdown 表格渲染成**列对齐**的文本表格。
  *
  * 为什么要做：模型回答里表格很常见（对比、参数清单、排期），但 Markdown 表格的
@@ -247,14 +327,19 @@ function padCell(text: string, width: number, align: ColAlign): string {
  * （实测同一张表四行，竖线分别在 0,7,14,21 / 0,13,22,31 / 0,9,19,26 列）。
  * 而 `panel` 的右边框是按显示宽度算的，两者一叠加，表就彻底散了。
  *
- * 输出**仍然是合法的 Markdown 表格**（还是 `|` 与 `-`，只是补齐了空格）：
- * 从终端里复制出去粘回 Markdown 文件依然是一张表。换成 `┼─` 这类绘制字符好看，
- * 但粘出去就只剩花纹了。
+ * 输出**仍然是合法的 Markdown 表格**（还是 `|` 与 `-`，只是补齐了空格）：从终端里
+ * 复制出去粘回 Markdown 文件依然是一张表。换成 `┼─` 这类绘制字符好看，但粘出去
+ * 就只剩花纹了。**「粘回来还是同一张表」是契约，不是愿望** —— 单元格里出现
+ * 字面竖线时会转义成 `\|`，见 `escapeCell`。
  *
  * @param lines 表格的原始行（含表头与分隔行），**只含这张表**
- * @returns 渲染后的行；不是合法表格时返回 `null`，由调用方原样输出，不做猜测
+ * @param maxWidth 结果每行的显示宽度上限；`0`（默认）表示不设上限、按绝对列宽排。
+ *                 面板里要传 `panelInnerWidth()`，否则超宽的表会顶穿右边框
+ *                 （`panel` 只能按行**截断**，越界的那几列会被整段吃掉）。
+ * @returns 渲染后的行；不是合法表格、或宽度实在装不下时返回 `null`，
+ *          由调用方原样输出，不做猜测
  */
-export function renderMarkdownTable(lines: readonly string[]): string[] | null {
+export function renderMarkdownTable(lines: readonly string[], maxWidth = 0): string[] | null {
   const rows = lines.map((l) => l.trimEnd());
   if (rows.length < 2) return null;
   if (!isTableRow(rows[0]) || !isTableSeparator(rows[1])) return null;
@@ -270,19 +355,26 @@ export function renderMarkdownTable(lines: readonly string[]): string[] | null {
   // 列宽按**渲染后**的显示宽度算：单元格里的 `code` / 加粗会变成 ANSI 序列，
   // 序列占 0 列但占码元 —— 量错了列就白对。
   const cells: string[][] = [header, ...body].map((row) =>
-    Array.from({ length: cols }, (_, i) => renderInline(row[i] ?? ""))
+    Array.from({ length: cols }, (_, i) => escapeCell(renderInline(row[i] ?? "")))
   );
-  const widths = Array.from({ length: cols }, (_, i) =>
+  const natural = Array.from({ length: cols }, (_, i) =>
     Math.max(...cells.map((row) => displayWidth(row[i])))
   );
+  const widths = fitWidths(natural, maxWidth, cols);
+  if (!widths) return null;
   const aligns = parseAligns(sep);
+
+  // 截断必须在**补空格之前**：先 padCell 再 clip 会连补出来的白一起截掉，
+  // 列宽又回到不一致；而且 padCell 补的白本身就是「宽度」，不能算进内容。
+  const fit = (row: readonly string[]): string[] =>
+    row.map((c, i) => (displayWidth(c) > widths[i] ? clipToWidth(c, widths[i]) : c));
   const draw = (row: readonly string[]): string =>
     "| " + row.map((c, i) => padCell(c, widths[i], aligns[i])).join(" | ") + " |";
 
   return [
-    draw(cells[0].map((c) => bold(c))),
+    draw(fit(cells[0]).map((c) => bold(c))),
     "|" + widths.map((w) => "-".repeat(w + 2)).join("|") + "|",
-    ...cells.slice(1).map(draw),
+    ...cells.slice(1).map((row) => draw(fit(row))),
   ];
 }
 
@@ -304,8 +396,14 @@ export function renderInline(line: string): string {
   );
 }
 
-/** 简单 Markdown 高亮: 标题加粗、代码块 dim、行内代码 cyan、表格列对齐 */
-export function renderMarkdown(text: string): string {
+/**
+ * 简单 Markdown 高亮: 标题加粗、代码块 dim、行内代码 cyan、表格列对齐。
+ *
+ * `maxWidth` 是表格的显示宽度上限，默认取 `panelInnerWidth()`（两个调用点都是
+ * `panel(renderMarkdown(x), title)`，所以默认值直接按面板内容宽算）。
+ * 传 `Infinity` 表示不设上限 —— 纯文本消费（测试、比对）用得上。
+ */
+export function renderMarkdown(text: string, maxWidth: number = panelInnerWidth()): string {
   const lines = text.split("\n");
   let inCodeBlock = false;
   const out: string[] = [];
@@ -330,7 +428,10 @@ export function renderMarkdown(text: string): string {
     if (isTableRow(line)) {
       let end = i + 2;
       while (end < lines.length && isTableRow(lines[end].trimEnd())) end++;
-      const table = renderMarkdownTable(lines.slice(i, end).map((l) => l.trimEnd()));
+      const table = renderMarkdownTable(
+        lines.slice(i, end).map((l) => l.trimEnd()),
+        maxWidth
+      );
       if (table) {
         out.push(...table);
         i = end - 1;
