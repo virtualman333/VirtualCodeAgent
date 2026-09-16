@@ -48,19 +48,28 @@ const buildOptions = {
   loader: {
     ".node": "empty",
   },
+  plugins: [
+    {
+      name: "rebuild-notifier",
+      setup(buildApi) {
+        buildApi.onEnd((result) => {
+          if (!isWatch) return;
+          if (result.errors.length > 0) {
+            console.error(
+              `[build-extension] 重新构建失败: ${result.errors.map((e) => e.text).join("\n")}`
+            );
+          } else {
+            console.log("[build-extension] 重新构建完成 → vscode/dist/extension.js");
+          }
+        });
+      },
+    },
+  ],
 };
 
 if (isWatch) {
   const ctx = await context(buildOptions);
-  await ctx.watch({
-    onRebuild(err) {
-      if (err) {
-        console.error(`[build-extension] 重新构建失败: ${err.message}`);
-      } else {
-        console.log("[build-extension] 重新构建完成 → vscode/dist/extension.js");
-      }
-    },
-  });
+  await ctx.watch();
   console.log("[build-extension] watch 模式已启动，修改代码后自动重建 extension.js");
 } else {
   await build(buildOptions);

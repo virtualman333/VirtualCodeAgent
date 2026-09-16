@@ -4,3 +4,7 @@ dist/
 *.vsix
 .vca/
 .vscode/
+
+# 本项目按 npm 约定（package-lock.json 入库、README 全部为 npm 命令），
+# pnpm-lock.yaml 只是本地 pnpm install 的副产物，不入库
+pnpm-lock.yaml

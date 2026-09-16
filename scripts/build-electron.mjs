@@ -26,16 +26,28 @@ const buildOptions = {
   external: ["electron"],
   sourcemap: true,
   logLevel: "warning",
+  plugins: [
+    {
+      name: "rebuild-notifier",
+      setup(buildApi) {
+        buildApi.onEnd((result) => {
+          if (!isWatch) return;
+          if (result.errors.length > 0) {
+            console.error(
+              `[build-electron] 重建失败: ${result.errors.map((e) => e.text).join("\n")}`
+            );
+          } else {
+            console.log("[build-electron] 重建完成 → electron/dist");
+          }
+        });
+      },
+    },
+  ],
 };
 
 if (isWatch) {
   const ctx = await context(buildOptions);
-  await ctx.watch({
-    onRebuild(err) {
-      if (err) console.error(`[build-electron] 重建失败: ${err.message}`);
-      else console.log("[build-electron] 重建完成 → electron/dist");
-    },
-  });
+  await ctx.watch();
   console.log("[build-electron] watch 模式启动");
 } else {
   await build(buildOptions);
