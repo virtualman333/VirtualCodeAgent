@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { displayWidth, stripAnsi } from "../src/ui.js";
+import { parseHistory } from "../src/input-history.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ENTRY = path.join(ROOT, "src", "main.ts");
@@ -60,9 +61,20 @@ function readyHome(): string {
   return home;
 }
 
-/** 往家目录里放一份输入历史（文件里最早在前，与 writeHistory 的约定一致） */
+/**
+ * 往家目录里放一份输入历史 —— **用 prompt_toolkit 的真实格式**，不是本模块自己那套。
+ *
+ * 真实文件（~/.vca/input_history）长这样：开头一个空行，然后每条是
+ * 「`# 时间戳` + `+内容`」，条目之间夹一个空行。
+ *
+ * 为什么必须照抄它：这一层顺带成了跨语言契约的端到端验证。喂一份「理想化」的
+ * 裸行文件，`+` 前缀没被剥掉这件事就永远暴露不出来 —— 本仓库实测，旧写法下
+ * ↑ 翻出来的每条历史前面都挂着一个 `+`，而所有测试都是绿的。
+ */
 function seedHistory(home: string, lines: string[]): void {
-  fs.writeFileSync(path.join(home, ".vca", "input_history"), lines.join("\n") + "\n", "utf-8");
+  const text =
+    "\n" + lines.map((l) => `# 2026-08-11 10:27:28.049413\n+${l}\n`).join("\n");
+  fs.writeFileSync(path.join(home, ".vca", "input_history"), text, "utf-8");
 }
 
 const HISTORY_FILE = (home: string): string => path.join(home, ".vca", "input_history");
@@ -273,9 +285,45 @@ test("/input：命令本身也进历史（shell 的惯例），下一轮 /input 
   const home = readyHome();
   seedHistory(home, SEED);
   runCommand(home, "/input 2");
-  const file = fs.readFileSync(HISTORY_FILE(home), "utf-8").trimEnd().split(/\r?\n/);
-  assert.equal(file[file.length - 1], "/input 2", "刚敲的命令应该被追加到文件末尾（文件里最早在前）");
-  assert.equal(file.length, SEED.length + 1);
+  const onDisk = parseHistory(fs.readFileSync(HISTORY_FILE(home), "utf-8"));
+  assert.equal(onDisk[0], "/input 2", "刚敲的命令是最新的一条（内存里最新在前）");
+  assert.equal(onDisk.length, SEED.length + 1, "历史里应恰好比种子多一条");
+  assert.deepEqual(
+    onDisk.slice(1),
+    [...SEED].reverse(),
+    "种子仍然原样在，而且没有被加号前缀污染"
+  );
+});
+
+test("★ 落盘后仍是 prompt_toolkit 认得的格式（Python 版读得回来）", () => {
+  // 这条只有在子进程层才成立：要跑过真入口，才知道真正写盘的是哪个函数。
+  const home = readyHome();
+  seedHistory(home, SEED);
+  runCommand(home, "/input 2");
+
+  const raw = fs.readFileSync(HISTORY_FILE(home), "utf-8");
+  const nonEmpty = raw.split("\n").filter((l) => l !== "");
+  assert.ok(nonEmpty.length > 0, "文件不该是空的");
+  for (const line of nonEmpty) {
+    assert.ok(
+      line.startsWith("+") || line.startsWith("#"),
+      `「${line}」既不是 + 条目也不是 # 时间戳 —— prompt_toolkit 只会拿它当分隔符，内容静默丢失`
+    );
+  }
+  // 21 条进去 21 条出来：少了分隔行的话 Python 版会把它们并成一条多行历史
+  assert.equal(
+    nonEmpty.filter((l) => l.startsWith("+")).length,
+    SEED.length + 1,
+    "`+` 条目数必须与历史条数一一对应"
+  );
+  // 相邻两行不能都是 `+` —— 那说明缺了分隔行，prompt_toolkit 会把它们并成一条
+  const allLines = raw.split("\n");
+  for (let i = 1; i < allLines.length; i++) {
+    assert.ok(
+      !(allLines[i].startsWith("+") && allLines[i - 1].startsWith("+")),
+      `第 ${i} 行与上一行都是 + 条目（缺分隔行）`
+    );
+  }
 });
 
 // ============================================================

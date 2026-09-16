@@ -59,19 +59,45 @@ test("★ parseHistory: 文件里最早在前，内存里最新在前", () => {
   assert.deepEqual(parseHistory(text), ["最新", "中间", "最早"]);
 });
 
-test("parseHistory: 跳过 prompt_toolkit 的 `# 时间戳` 注释行", () => {
-  // 这是 ~/.vca/input_history 里的真实形态（Python 版留下的），
-  // 开头还有一个空行 —— 都要能正确跳过
+test("★ parseHistory: 读 prompt_toolkit 写出的真实文件（`+` 前缀 + `#` 时间戳 + 空行）", () => {
+  // 逐字节照抄 ~/.vca/input_history 里的真实形态（Python 版留下的）：
+  // 每条是 `+<内容>`，条目之间是「空行 + `# 时间戳` + 空行」。
+  // ⚠ 断言里必须有「一条都不以 `+` 开头」—— 少了 `+` 的前缀剥离，
+  // ↑ 翻出来的每条历史前面都会挂一个 `+`（本仓库实测 21/21 条如此）。
   const text = [
     "",
     "# 2026-08-11 10:27:28.049413",
-    "/help",
+    "+/help",
     "",
     "# 2026-08-11 10:27:37.040194",
-    "/help ",
+    "+/help ",
+    "",
+    "# 2026-08-11 10:37:52.890992",
+    "+hi",
+    "",
+    "# 2026-08-11 10:38:12.383480",
+    "+你是谁？",
     "",
   ].join("\n");
-  assert.deepEqual(parseHistory(text), ["/help", "/help"]);
+  const parsed = parseHistory(text);
+  assert.deepEqual(parsed, ["你是谁？", "hi", "/help", "/help"]);
+  assert.deepEqual(
+    parsed.filter((e) => e.startsWith("+")),
+    [],
+    "`+` 只是 prompt_toolkit 的标记，不能留在内容里"
+  );
+});
+
+test("★ parseHistory: prompt_toolkit 的多行条目（连续多行 `+`）合成一条", () => {
+  // prompt_toolkit 存多行输入时是每行都加一个 `+`，中间没有分隔行
+  const text = ["# 2026-08-11 10:27:28.049413", "+第一行", "+第二行", "", "+单行", ""].join("\n");
+  assert.deepEqual(parseHistory(text), ["单行", "第一行 第二行"]);
+});
+
+test("★ parseHistory: `+# 日期` 是用户真敲过的输入，不能因为剥了前缀就像注释而被吃掉", () => {
+  // 顺序陷阱：先判注释再剥 `+` 的话，这条真实输入会被当成时间戳注释
+  const text = ["+# 2026-01-01 的计划", "# 2026-01-01 10:00:00.000000", "+普通一条"].join("\n");
+  assert.deepEqual(parseHistory(text), ["普通一条", "# 2026-01-01 的计划"]);
 });
 
 test("★ parseHistory: 用户真的敲过 `# 注释` 时不能被当成时间戳吃掉", () => {
@@ -84,6 +110,9 @@ test("parseHistory: 空行与纯空白行不产生条目", () => {
   assert.deepEqual(parseHistory("\n\n   \n"), []);
   assert.deepEqual(parseHistory(""), []);
   assert.deepEqual(parseHistory(null), []);
+  // 只有分隔符、没有任何条目的文件也必须是空的
+  assert.deepEqual(parseHistory("\n# 2026-08-11 10:27:28.049413\n\n"), []);
+  assert.deepEqual(parseHistory("+\n+\n"), []);
 });
 
 test("parseHistory: 超过上限时保留最新的那批（不是最旧的）", () => {
@@ -99,8 +128,21 @@ test("parseHistory: 超过上限时保留最新的那批（不是最旧的）", 
 // formatHistory —— 内存 → 文件
 // ============================================================
 
-test("★ formatHistory: 内存最新在前 → 文件最早在前", () => {
-  assert.equal(formatHistory(["最新", "中间", "最早"]), "最早\n中间\n最新\n");
+test("★ formatHistory: 内存最新在前 → 文件最早在前，每条带 `+` 前缀、空行分隔", () => {
+  assert.equal(formatHistory(["最新", "中间", "最早"]), "+最早\n\n+中间\n\n+最新\n");
+});
+
+test("★ formatHistory: 每条都带 `+` 前缀，且条目之间有非 `+` 行", () => {
+  const text = formatHistory(["a", "b c", "+86 138"]);
+  const nonEmpty = text.split("\n").filter((l) => l !== "");
+  for (const line of nonEmpty) {
+    assert.ok(line.startsWith("+"), `「${line}」缺 + 前缀 —— prompt_toolkit 会把整行当分隔符丢掉`);
+  }
+  // 用户自己敲的 `+86…` 落盘成 `++86…` 是对的：读回来剥一层正好还原。
+  // 不这么写，Python 版读到它只会当成一个空的分隔行。
+  assert.ok(text.includes("++86 138"), "以 `+` 开头的输入必须再补一层前缀");
+  // 相邻两条之间必须有一个空行 —— 否则 prompt_toolkit 会把它们并成一条
+  assert.equal(text, "++86 138\n\n+b c\n\n+a\n");
 });
 
 test("formatHistory: 空列表写出空串（不留一个孤零零的换行）", () => {
@@ -118,6 +160,92 @@ test("★ 往返幂等：已经写出去的文件再读再写，字节完全不�
   const once = formatHistory(mem);
   const twice = formatHistory(parseHistory(once));
   assert.equal(twice, once, "第二次写出的内容必须与第一次逐字节相同");
+});
+
+test("★ 往返一致：prompt_toolkit 的文件 → 内存 → 文件，再读回来还是同一批", () => {
+  // 这是缺陷 A 的锁：不剥 `+` 的话第一批就是 `+/help` 这种，再往返一次会
+  // 变成 `++/help`，越走越歪 —— 断言「两轮之后内容不变」能一次抓住。
+  const ptkText = [
+    "",
+    "# 2026-08-11 10:27:28.049413",
+    "+/help",
+    "",
+    "# 2026-08-11 10:37:52.890992",
+    "+hi",
+    "",
+  ].join("\n");
+  const first = parseHistory(ptkText);
+  const second = parseHistory(formatHistory(first));
+  assert.deepEqual(second, first);
+  assert.deepEqual(second, ["hi", "/help"]);
+});
+
+// ============================================================
+// 与 Python 版共用同一个文件 —— 跨语言格式契约
+// ============================================================
+//
+// 「两边能互相读回来」是 README 与模块头注释都写着的承诺，而它以前是假的：
+// TS 版既没剥 `+` 前缀、也不写分隔行。判断这件事只有一种办法 ——
+// **用 prompt_toolkit 自己的读取算法跑一遍**。下面这个函数逐行照抄自
+// prompt_toolkit/history.py 的 FileHistory.load_history_strings()
+// （src/prompt_toolkit/history.py，3.0 起未变），只把 Python 语法转成 JS。
+// 改这个函数就等于改契约 —— 它不是「我们的实现」，是**对方的实现**。
+
+/** prompt_toolkit FileHistory 的读取算法（照抄官方实现，勿改） */
+function ptLoadHistoryStrings(text: string): string[] {
+  const strings: string[] = [];
+  let lines: string[] = [];
+  const add = (): void => {
+    if (lines.length) {
+      // Join and drop trailing newline.
+      strings.push(lines.join("").slice(0, -1));
+    }
+    lines = [];
+  };
+  for (const raw of text.split("\n").slice(0, -1)) {
+    // 复刻 `for line_bytes in f`：每行**保留**结尾的换行符
+    const line = raw + "\n";
+    if (line.startsWith("+")) lines.push(line.slice(1));
+    else add();
+  }
+  add();
+  return strings.reverse(); // 官方返回 reversed(strings)：最新在前
+}
+
+test("★ 跨语言契约：TS 写出的文件，prompt_toolkit 读回完全相同的条目", () => {
+  const mem = [
+    "/cd E:\\agent\\VirtualCodeAgent",
+    "帮我看看这个报错的根因",
+    "hi",
+    "/help",
+    "+86 13800000000",
+    "# 2026-01-01 的计划",
+  ];
+  const asSeenByPython = ptLoadHistoryStrings(formatHistory(mem));
+  assert.deepEqual(asSeenByPython, mem, "Python 版读回来的必须与内存里逐条相同");
+});
+
+test("★ 跨语言契约：条数不能缩水（少了分隔行会被并成一条多行历史）", () => {
+  // 实测过：缺分隔行时 21 条会被 Python 读成 1 条 21 行的巨型条目 ——
+  // 不报错，用户只觉得历史「没了」。条数是最先塌的那一环，单独锁一条。
+  const mem = Array.from({ length: 21 }, (_, i) => `cmd-${i}`);
+  const asSeenByPython = ptLoadHistoryStrings(formatHistory(mem));
+  assert.equal(asSeenByPython.length, mem.length, "21 条进去必须 21 条出来");
+  assert.deepEqual(asSeenByPython, mem);
+});
+
+test("★ 跨语言契约：prompt_toolkit 写出的文件，TS 读出来的内容里不带 `+`", () => {
+  const ptkText = ["", "# 2026-08-11 10:27:28.049413", "+/help", "", "# 2026-08-11 10:37:52.890992", "+hi", ""].join("\n");
+  // 先确认这份样本本身是 prompt_toolkit 认得的样子（否则下面的断言没有意义）
+  assert.deepEqual(ptLoadHistoryStrings(ptkText), ["hi", "/help"]);
+  assert.deepEqual(parseHistory(ptkText), ["hi", "/help"], "两个实现读同一份文件必须得到同一个结果");
+});
+
+test("★ 跨语言契约：TS 自己的旧文件（裸行，无 `+`）仍要能读回来", () => {
+  // 本模块早期版本写出去的就是这种文件，用户机器上可能还躺着 —— 得兼容。
+  // （prompt_toolkit 只会拿这种行当分隔符，所以「宽松读、严格写」不打架。）
+  assert.deepEqual(parseHistory("旧一\n旧二\n"), ["旧二", "旧一"]);
+  assert.equal(ptLoadHistoryStrings("旧一\n旧二\n").length, 0, "Python 版读不了裸行格式 —— 所以新写的必须是 `+` 形态");
 });
 
 // ============================================================

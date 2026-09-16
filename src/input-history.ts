@@ -5,9 +5,9 @@
  * ui.promptUser 每次 new 一个不带 history 的 readline，↑ 什么都翻不出来，
  * 敲一个长任务描述、按回车发现模型选错，就只能整段重打。
  * 这里把它补回来，并且**沿用同一个文件**（~/.vca/input_history）与同一种
- * 格式，所以 Python 版留下的历史直接就能读回来，不用迁移。
+ * 格式，所以两边留下的历史都能互相读回来，不用迁移。
  *
- * ⚠ 两个顺序约定，别弄反（这是本模块唯一容易出错的地方）：
+ * ⚠ 两个顺序约定，别弄反：
  *   - 文件里：**最早在前**（追加式，跟日志一样）
  *   - 内存里：**最新在前**（Node readline 的 history 就是 newest-first，
  *     ↑ 从数组末尾往前翻）
@@ -15,6 +15,39 @@
  *
  * 不 import 任何本项目模块：文件路径由调用方传进来，所以测试可以用临时
  * 文件跑，不会碰到真实的 ~/.vca。
+ *
+ * ============================================================
+ * 落盘格式 = prompt_toolkit FileHistory 的格式（**唯一一处定义**）
+ * ============================================================
+ *
+ * 每条历史写成一行 `+<内容>`；条目与条目之间用一个**空行**隔开。
+ *
+ * 为什么这件事必须写下来、而且必须在读写两侧同时实现：prompt_toolkit 的
+ * `FileHistory.load_history_strings()`（history.py，官方实现）读文件时是这样的
+ *
+ *     if line.startswith("+"):
+ *         lines.append(line[1:])      # 累积一条（多行条目就是连续多行 `+`）
+ *     else:
+ *         add(); lines = []           # 非 `+` 行 → 收尾一条
+ *
+ * 也就是说，**条目之间的分隔靠的是「非 `+` 行」，不是换行**。两个方向都踩过：
+ *
+ *   - **少写 `+` 前缀** → 整行被 prompt_toolkit 当成「分隔符」，内容静默丢弃。
+ *     用户敲过 `+86 幺三八…` 这种以 `+` 开头的输入，若原样落盘，Python 版
+ *     永远读不回来。
+ *   - **少写分隔行**（连续多行 `+...`）→ 被拼成**一条多行历史**。实测：21 条
+ *     历史写出去，Python 版读回来是 1 条、21 行的巨型条目 —— 不报错，只是
+ *     历史「没了」。
+ *   - **读的时候不剥 `+`** → ↑ 翻出来的每条历史前面都多一个 `+`（实测 21/21）。
+ *
+ * 分隔用**空行**而不是 prompt_toolkit 那种 `# <时间戳>`：格式上完全等价
+ * （都满足「非 `+` 行」这一条判据），而内存里没有逐条时间，凭空盖一个
+ * 「现在」是假信息。
+ *
+ * ⚠ 还有一处顺序不能反：**`+` 行先剥前缀、再判别的，不要先判「是不是注释」**。
+ * 用户完全可能真敲过 `# 2026-01-01 的计划`，prompt_toolkit 存的是
+ * `+# 2026-01-01 的计划`。先按行首判注释的话，这条真实输入会被当成时间戳
+ * 注释吃掉 —— 剥了前缀之后它的行首恰好长得像注释。
  */
 import fs from "node:fs";
 import path from "node:path";
@@ -136,31 +169,60 @@ export function clearHistory(entries: string[]): string[] {
 /**
  * 文件文本 → 内存数组（最新在前）。
  *
- * 认两种行：
- *   - `# 2026-08-11 10:27:28.049413` —— prompt_toolkit 的时间戳注释，跳过
- *   - 其它非空行 —— 一条历史
+ * 认三种行（判据与顺序都写在本文件头部的「落盘格式」一节里）：
+ *   - `+<内容>` —— prompt_toolkit 的历史条目。**连续多行 `+` 属于同一条**
+ *     （它就是这么存多行输入的：每行都加一个 `+`），合并后再压成单行。
+ *   - `# 2026-08-11 10:27:28.049413` —— prompt_toolkit 的时间戳注释 / 分隔行，跳过
+ *   - 其它非空行 —— 一条历史。这一条是**向后兼容**：本模块早期版本写出去的是
+ *     不带 `+` 的裸行，用户机器上可能还躺着这种文件，得能读回来。
+ *     （prompt_toolkit 只会拿这种行当分隔符，所以「宽松读、严格写」不会打架。）
  *
- * 只把形如 `# <日期>` 的行当注释：用户完全可能真的敲过一行 `# 注释`，
- * 那种不能被吃掉。反过来，我们自己写文件时不写时间戳（内存里没有逐条
- * 时间，凭空盖一个"现在"是假信息），prompt_toolkit 读没有时间戳的行也认。
+ * ⚠ `+` 分支必须在注释判断**之前**：`+# 2026-01-01 的计划` 是用户真敲过的输入，
+ * 剥掉 `+` 之后它的行首恰好长得像时间戳注释 —— 先判注释就会把它吃掉。
  */
 export function parseHistory(text: unknown): string[] {
   const out: string[] = [];
+  /** 正在累积的那一条（连续 `+` 行 = 同一条多行历史，prompt_toolkit 的写法） */
+  let pending: string[] = [];
+
+  const flush = (): void => {
+    if (pending.length === 0) return;
+    const entry = normalizeEntry(pending.join("\n"));
+    pending = [];
+    if (entry) out.push(entry);
+  };
+
   for (const raw of String(text ?? "").split(/\r?\n/)) {
-    if (/^#\s*\d{4}-\d{2}-\d{2}/.test(raw)) continue;
+    if (raw.startsWith("+")) {
+      pending.push(raw.slice(1)); // 剥掉前缀 —— 它只是标记，不是内容
+      continue;
+    }
+    flush();
+    if (/^#\s*\d{4}-\d{2}-\d{2}/.test(raw)) continue; // 时间戳注释 / 分隔行
     const entry = normalizeEntry(raw);
-    if (!entry) continue;
-    out.push(entry);
+    if (entry) out.push(entry);
   }
+  flush();
+
   out.reverse();
   return out.slice(0, HISTORY_MAX);
 }
 
-/** 内存数组（最新在前）→ 文件文本（最早在前，一行一条） */
+/**
+ * 内存数组（最新在前）→ 文件文本（最早在前）。
+ *
+ * 格式见文件头部：每条 `+<内容>`，条目之间空行分隔。**每一项都要加 `+`**，
+ * 少了它 prompt_toolkit 会把这一行当分隔符、内容静默丢失；**条目之间必须有
+ * 非 `+` 行**，少了它 prompt_toolkit 会把相邻几条合并成一条多行历史。
+ * 两者都实测过（见测试里照抄官方算法的那条往返锁）。
+ */
 export function formatHistory(entries: readonly string[]): string {
-  const lines = entries.map(normalizeEntry).filter((l) => l.length > 0);
+  const lines = entries
+    .map((e) => normalizeEntry(e))
+    .filter((l) => l.length > 0)
+    .map((l) => `+${l}`);
   if (lines.length === 0) return "";
-  return lines.reverse().join("\n") + "\n";
+  return lines.reverse().join("\n\n") + "\n";
 }
 
 /** 读历史。文件不存在 / 读不动 / 内容损坏都按「没有历史」处理，不该拦住启动 */
