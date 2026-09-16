@@ -5,6 +5,11 @@
  * 2. VS Code Webview (扩展内嵌) → vscode.postMessage RPC
  */
 
+import { resolveWsUrl } from "./ws-url";
+
+export type { WsUrlInput } from "./ws-url";
+export { resolveWsUrl } from "./ws-url";
+
 export interface ServerEvent {
   type: string;
   [key: string]: unknown;
@@ -26,9 +31,48 @@ export function isVscodeEnv(): boolean {
   );
 }
 
-export function isElectronEnv(): boolean {
-  return typeof (window as unknown as { vca?: { isElectron?: boolean } }).vca?.isElectron === true;
+/** 主进程通过 `vca:init` 报上来的启动信息（preload 注入在 `window.vca` 上） */
+export interface DesktopInit {
+  port: number;
+  platform: string;
+  version: string;
 }
+
+interface VcaBridge {
+  isElectron?: boolean;
+  onInit?(cb: (info: DesktopInit) => void): () => void;
+}
+
+export function isElectronEnv(): boolean {
+  return typeof (window as unknown as { vca?: VcaBridge }).vca?.isElectron === true;
+}
+
+/**
+ * 订阅主进程的启动信息；Electron 之外是空操作。
+ *
+ * preload 在**自己加载时**就把这条事件挂上了，并把收到的那份留着补发 ——
+ * 所以这里注册得比主进程发送晚也照样拿得到（主进程是在 `did-finish-load` 才发的，
+ * 页面脚本早于它跑完，靠 on/off 的时序去赌是不牢的）。
+ */
+export function onDesktopInit(cb: (info: DesktopInit) => void): () => void {
+  const b = (window as unknown as { vca?: VcaBridge }).vca;
+  return b?.onInit ? b.onInit(cb) : () => {};
+}
+
+/**
+ * 按当前页面决定连哪儿 —— 读 `location.host` 的地方只有这一处。
+ *
+ * `desktopPort` 只在页面**没有 host** 时才会被调用（Electron 打包后等主进程报端口）。
+ */
+export async function resolveBackendWsUrl(
+  desktopPort?: () => Promise<number | null>
+): Promise<string | null> {
+  const host = location.host;
+  if (host) return resolveWsUrl({ protocol: location.protocol, host });
+  const port = desktopPort ? await desktopPort() : null;
+  return resolveWsUrl({ protocol: location.protocol, host: "", backendPort: port });
+}
+
 
 /**
  * Electron 下用 IPC 打开文件 (VS Code 走 vscode 协议; 其他平台走系统默认)

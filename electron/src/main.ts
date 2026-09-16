@@ -159,7 +159,9 @@ async function createWindow(): Promise<void> {
         : undefined,
     autoHideMenuBar: true,
     webPreferences: {
-      preload: path.join(__dirname, "preload.js"),
+      // preload 产物是 CJS（esbuild format=cjs），而根 package.json 是 `"type": "module"`，
+      // 所以必须带 `.cjs` 后缀，否则会被当成 ESM 加载而报 `require is not defined`。
+      preload: path.join(__dirname, "preload.cjs"),
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,

@@ -25,6 +25,7 @@ import {
   isVscodeEnv,
   createVscodeTransport,
   createWsTransport,
+  resolveBackendWsUrl,
   type Transport,
   type ServerEvent,
 } from "./transport";
@@ -490,16 +491,22 @@ function initTransport(): void {
     return;
   }
 
-  const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-  const url = `${protocol}//${location.host}/ws`;
-  transport = createWsTransport(url, handleEvent, (c) => {
-    connected.value = c;
-    if (c) {
-      createTab();
-    } else {
-      for (const t of tabs.value) t.running = false;
+  // 浏览器入口：地址一律走 transport.ts 的同一个拼装处（那里才有 location.host 的读法）。
+  void (async () => {
+    const url = await resolveBackendWsUrl();
+    if (!url) {
+      console.error("[vca] 拼不出后端地址，无法连接");
+      return;
     }
-  });
+    transport = createWsTransport(url, handleEvent, (c) => {
+      connected.value = c;
+      if (c) {
+        createTab();
+      } else {
+        for (const t of tabs.value) t.running = false;
+      }
+    });
+  })();
 }
 
 function handleEvent(e: ServerEvent): void {

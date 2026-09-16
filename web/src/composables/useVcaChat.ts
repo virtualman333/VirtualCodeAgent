@@ -16,6 +16,8 @@ import {
   createWsTransport,
   isVscodeEnv,
   isElectronEnv,
+  onDesktopInit,
+  resolveBackendWsUrl,
   openFileInExternalEditor,
   type Transport,
   type ServerEvent,
@@ -136,6 +138,8 @@ export function useVcaChat(): {
   destroy: () => void;
   isVscode: boolean;
   isElectron: boolean;
+  /** 桌面版版本号（形如 `v0.3.0`），来自主进程；浏览器下是空串 */
+  desktopVersion: ReturnType<typeof ref<string>>;
 } {
   const tabs = ref<ChatTab[]>([]);
   const activeTabId = ref("");
@@ -164,11 +168,46 @@ export function useVcaChat(): {
   const askPending = computed(() => activeTab.value?.askPending ?? null);
 
   let transport: Transport | null = null;
+  let destroyed = false;
   let msgSeq = 0;
   let imgSeq = 0;
   const toolById = new Map<string, ToolCallInfo>();
   const isVscode = isVscodeEnv();
   const isElectron = isElectronEnv();
+
+  // ============================================================
+  // Electron 主进程报过来的启动信息（端口 / 版本）
+  // ============================================================
+
+  /**
+   * 桌面版的**端口与版本号只有主进程知道**（它是 `PORT` 的持有者，也是 `app.getVersion()`
+   * 的持有者）。以前这里收到 `vca:init` 之后什么都没做：地址照 `location.host` 拼
+   * （打包后是空串 → `ws:///ws`，连不上），侧栏版本号写死 `v0.2.0`（实际早就不是了，
+   * 界面上一直在显示错的那个）。现在一律以主进程报的这一份为准。
+   */
+  const desktopPort = ref<number | null>(null);
+  const desktopVersion = ref("");
+  let portWaiters: Array<(port: number | null) => void> = [];
+
+  onDesktopInit((info) => {
+    desktopPort.value = Number.isInteger(info?.port) ? Number(info.port) : null;
+    desktopVersion.value = info?.version ? `v${info.version}` : "";
+    portWaiters.splice(0).forEach((resolve) => resolve(desktopPort.value));
+  });
+
+  /** 等主进程报端口。preload 会把已经收到的那份补发，所以通常立刻就有。 */
+  function waitForDesktopPort(): Promise<number | null> {
+    if (desktopPort.value != null) return Promise.resolve(desktopPort.value);
+    return new Promise((resolve) => {
+      const answer = (port: number | null): void => {
+        portWaiters = portWaiters.filter((r) => r !== answer);
+        resolve(port);
+      };
+      portWaiters.push(answer);
+      // 兜底：主进程没报就别一直悬着 —— 调用方据此报「连不上」，而不是永远停在连接中
+      setTimeout(() => answer(null), 5000);
+    });
+  }
 
   // ============================================================
   // Tab CRUD
@@ -620,16 +659,28 @@ export function useVcaChat(): {
       });
       return;
     }
-    const protocol = location.protocol === "https:" ? "wss:" : "ws:";
-    const url = `${protocol}//${location.host}/ws`;
-    transport = createWsTransport(url, handleEvent, (c) => {
-      connected.value = c;
-      if (c && tabs.value.length === 0) createTab();
-      else if (!c) for (const t of tabs.value) t.running = false;
-    });
+    // 地址怎么拼由 transport.ts 决定（只有那里读 location.host）。
+    // Electron 打包后页面是 file://，没有 host —— 那时只能等主进程通过 vca:init 报端口，
+    // 拿不到就明确报错，绝不拼一个 `ws:///ws` 出来当地址。
+    void (async () => {
+      const url = await resolveBackendWsUrl(isElectron ? waitForDesktopPort : undefined);
+      if (destroyed) return;
+      if (!url) {
+        console.error(
+          "[vca] 拿不到后端地址：页面没有 host，主进程也没报端口（vca:init）。桌面版无法连接。"
+        );
+        return;
+      }
+      transport = createWsTransport(url, handleEvent, (c) => {
+        connected.value = c;
+        if (c && tabs.value.length === 0) createTab();
+        else if (!c) for (const t of tabs.value) t.running = false;
+      });
+    })();
   }
 
   function destroy(): void {
+    destroyed = true;
     transport?.close();
     transport = null;
   }
@@ -685,5 +736,6 @@ export function useVcaChat(): {
     destroy,
     isVscode,
     isElectron,
+    desktopVersion,
   };
 }

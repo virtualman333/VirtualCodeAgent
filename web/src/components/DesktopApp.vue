@@ -82,6 +82,7 @@ const {
   tabTitle,
   initTransport,
   destroy,
+  desktopVersion,
 } = chat;
 
 const chatListRef = ref<InstanceType<typeof TChatList> | null>(null);
@@ -189,16 +190,9 @@ const showChatView = computed(() => messages.value.length > 0);
 onMounted(() => {
   initTransport();
   nextTick(focusInput);
-
-  // Electron init 事件
-  const w = window as unknown as {
-    vca?: {
-      onInit(cb: (p: { port: number; platform: string; version: string }) => void): () => void;
-    };
-  };
-  w.vca?.onInit?.(() => {
-    // 可以根据 port 显示调试信息, 此处留空
-  });
+  // `vca:init`（端口 / 版本）由 useVcaChat 统一订阅：地址要端口、侧栏要版本。
+  // 这里原本另有一份订阅，回调体是空的（注释还写着「此处留空」）—— 那份订阅的存在
+  // 让「主进程给的东西已经用上了」看起来很真，实际两样都没用。
 });
 onUnmounted(() => {
   destroy();
@@ -219,7 +213,7 @@ function onQuit(): void {
         <img src="/logo-512.png" alt="VCA" class="brand-logo" />
         <div class="brand-meta">
           <div class="brand-name">VCA</div>
-          <div class="brand-ver">v0.2.0</div>
+          <div class="brand-ver" v-if="desktopVersion">{{ desktopVersion }}</div>
         </div>
         <button class="icon-btn" title="搜索"><SearchIcon /></button>
         <button class="icon-btn" title="筛选"><SettingIcon /></button>

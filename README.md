@@ -2,7 +2,7 @@
 
 ![logo](vscode/media/logo.png)
 
-> LangGraph.js 驱动的编码 Agent —— 通过对话自动完成编程任务，支持控制台、Web、VS Code 三种形态。
+> LangGraph.js 驱动的编码 Agent —— 通过对话自动完成编程任务，支持控制台、Web、VS Code、桌面端四种形态。
 
 VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](https://github.com/langchain-ai/langgraphjs) 编排 Agent 工作流，调用 OpenAI 兼容的大模型，并通过一组内置工具（读/写/搜/执行命令等）在指定工作空间内自主完成编码任务。
 
@@ -10,7 +10,7 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 
 ## 特性
 
-- **多形态运行**：同一套核心 Agent，可跑在控制台 CLI、独立 Web 面板、或 VS Code 扩展里。
+- **多形态运行**：同一套核心 Agent，可跑在控制台 CLI、独立 Web 面板、VS Code 扩展、或桌面端（Electron）里。
 - **内置工具集**（`src/tools/`）：读文件、搜索（glob / grep）、编辑、写入、执行命令（bash）、提问（ask_user）、任务计划（plan）。
 - **会话持久化**：对话自动保存，可随时 `/load` 恢复历史会话、切换工作空间。
 - **交互式打断**：执行过程中可用 `Ctrl+C` 中断；Agent 遇到歧义时通过 `ask_user` 向用户确认。
@@ -28,8 +28,9 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 | 模型接入 | `@langchain/openai`（OpenAI 兼容接口，可自定义 base_url / model） |
 | 前端 | Vue 3 + Vite（`web/`） |
 | 编辑器集成 | VS Code Extension（Webview 面板，`vscode/`） |
+| 桌面端 | Electron（外壳 + 内嵌后端，`electron/`，由 electron-builder 打包） |
 | 通信 | WebSocket（`ws`）连接后端 Agent 服务 |
-| 构建 | `tsc` / `esbuild` / `vsce` |
+| 构建 | `tsc` / `esbuild` / `vite` / `vsce` / `electron-builder` |
 
 ---
 
@@ -56,8 +57,9 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 ├── tests/               # 测试：cli-args / help / completer / input-history / ui / version（纯函数）
 │                        #       + cli-spawn（真的起子进程，含启动面板对齐）
 ├── vscode/              # VS Code 扩展（聊天面板、AskUser 弹窗、工具调用流式展示）
-├── web/                 # 独立 Web 聊天前端（Vue 3 + Vite）
-├── scripts/             # 扩展构建脚本（build-extension.mjs）
+├── electron/            # 桌面端外壳（主进程 + preload；由 electron-builder 打包）
+├── web/                 # 独立 Web 聊天前端（Vue 3 + Vite），同时供桌面端复用
+├── scripts/             # 构建脚本：build-extension.mjs（扩展）/ build-electron.mjs（桌面端）/ publish.mjs（扩展发布）
 ├── build-vsix.bat       # 一键构建并打包 VSIX（Windows）
 └── python_legacy/       # 早期 Python 实现（已弃用，仅作参考保留）
 ```
@@ -269,6 +271,21 @@ build-vsix.bat        # 完整构建并打包 VSIX（Windows）
 
 > 扩展详细用法见 [`vscode/README.md`](vscode/README.md)。
 
+### D. 桌面端（Electron）
+
+```bash
+npm run electron:build    # 构建主进程 / preload → electron/dist
+npm run electron:run      # 直接起桌面端（需要先 build:web）
+npm run electron:dist:win # 完整打包（tsc + web + electron + electron-builder）→ release/
+```
+
+桌面端壳自己会**内嵌启动后端**（`node dist/server.js`），所以不需要另开 `npm run server`。
+
+两条与「装了才出问题」直接相关的约定，改这块之前先看一眼：
+
+- **端口只有一个来源**。主进程持有 `PORT`（默认 3001），并且**必须**通过 `vca:init` 把它告诉渲染层；渲染层再拿它拼 ws 地址。打包后页面是从磁盘加载的（`file://`），`location.host` 是空串 —— 不拿主进程那个端口就只能拼出 `ws:///ws` 这种连不到任何地方的地址（开发模式下 Vite 会把 `/ws` 代理到 3001，所以**只有打包后才炸**）。地址的拼装只在 `web/src/ws-url.ts` 一处，`tests/electron-boot.test.ts` 盯着。
+- **产物后缀必须与 `type: module` 对付**。esbuild 出的是 CJS，而根 `package.json` 是 `"type": "module"`，所以主进程/preload 的产物是 `.cjs`，`package.json` 的 `main` 指向 `electron/dist/main.cjs`。名字写成 `.js` 的话 Electron 会按 ESM 加载它，第一行 `require("electron")` 就 `ReferenceError: require is not defined in ES module scope`。
+
 ---
 
 ## 配置说明
@@ -327,7 +344,7 @@ npm run check         # typecheck:test + test
 
 测试分两层：
 
-- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` / `tests/ui.test.ts` / `tests/version.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则（含与 prompt_toolkit 的**格式往返** —— 把官方 `FileHistory.load_history_strings()` 的读取算法照抄进测试当契约，而不是拿自家实现的假设去测自家实现）、控制台宽度的口径（`panel` 每一行的显示宽度只有一个值、窄终端才截断、`📋` 算 2 列而 `⚡` 算 1 列）、Markdown 表格（中文列也对齐、已经对齐的表格再渲染一遍不再变、带竖线的命令行不会被吃成表格、`\|` 转义后能原样读回来、超宽表格按面板宽度收窄后不被 `panel` 二次截断）、版本号只有一个读取处。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据。
+- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` / `tests/ui.test.ts` / `tests/version.test.ts` / `tests/electron-boot.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则（含与 prompt_toolkit 的**格式往返** —— 把官方 `FileHistory.load_history_strings()` 的读取算法照抄进测试当契约，而不是拿自家实现的假设去测自家实现）、控制台宽度的口径（`panel` 每一行的显示宽度只有一个值、窄终端才截断、`📋` 算 2 列而 `⚡` 算 1 列）、Markdown 表格（中文列也对齐、已经对齐的表格再渲染一遍不再变、带竖线的命令行不会被吃成表格、`\|` 转义后能原样读回来、超宽表格按面板宽度收窄后不被 `panel` 二次截断）、版本号只有一个读取处（含界面与文档 —— 侧栏写死过版本号，一直没人核对）、桌面端地址拼装（没有 host 时用主进程报的端口，拿不到就返回 `null` 而不是拼出 `ws:///ws`）。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据。
 - `tests/cli-spawn.test.ts` —— 入口冒烟层。**真的把 CLI 当子进程跑起来**，断言 stdout / stderr / 退出码。这一层存在的理由：上一轮那个「入口守卫在 Windows 上永不成立、`npm run dev` 一行输出都没有」的故障，在所有纯函数测试里都是绿的 —— 被测函数一个都没被调用。判据很朴素：**stdout 是空的就说明 `main()` 压根没跑**。启动面板的对齐也量在这里：喂假数据量不出「终端列数 + 真实内容」组合出来的宽度。
 
 至于 `↑` 与 `Tab` 这类**真终端按键行为**，不在自动化范围内：用管道喂 stdin 能验到「历史被正确读写、命令正常执行」，按键本身需要 TTY，只能本地手工过一遍。
@@ -338,8 +355,9 @@ npm run check         # typecheck:test + test
 
 ## 版本
 
-- 当前核心版本：**0.3.0**（TypeScript 重写版）
-- VS Code 扩展**独立发版**，打包产物在 `vscode/vca-coding-agent-<版本>.vsix`，版本号见 `vscode/package.json` —— 这里不抄具体数字（抄一份必然漂移：此前这里写着 `0.1.2`，而仓库里根本没有那个文件）
+- 当前核心版本见根目录 `package.json` 的 `version`（`vca --version` 就是现读它，`src/version.ts` 是唯一读取处）—— **这里不抄具体数字**，理由见下一条。
+- VS Code 扩展**独立发版**，打包产物在 `vscode/vca-coding-agent-<版本>.vsix`，版本号见 `vscode/package.json` —— 这里也不抄（抄一份必然漂移：此前这里写着扩展的旧版本号，而仓库里根本没有那个文件）。
+- 桌面版侧栏显示的版本号取自主进程的 `app.getVersion()`（`vca:init` 带给渲染层）—— 同样不抄第二份。
 - `python_legacy/` 为早期 Python 实现，已弃用，仅保留作参考。
 
 ---

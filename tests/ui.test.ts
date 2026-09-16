@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { blue, bold, clipToWidth, cyan, dim, displayWidth, padRight, panel, renderInline, renderMarkdown, renderMarkdownTable, stripAnsi, yellow } from "../src/ui.js";
+import { stripComments } from "./source-utils.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -663,11 +664,10 @@ test("renderMarkdown: 空单元格与尾随空格不破坏对齐", () => {
 // 这一节读 `src/ui.ts` 的源码文本。踩过的坑：`clipToWidth` 里那条
 // 「为什么不能直接 `for (const ch of text)`」的**注释**，被锁当成了实现 ——
 // 于是锁在已经修好的代码上红了。在注释里写反面示例是好事，锁必须绕开它。
-
-/** 剥掉注释再扫（只够本文件用：ui.ts 的字符串里没有 `//`） */
-function stripComments(src: string): string {
-  return src.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
-}
+//
+// `stripComments` 已收敛到 `./source-utils.ts` 一处（此前三个测试文件各有一份拷贝，
+// 且都写成 `/\/\/[^\n]*/` —— 会把**字符串里的** `//` 当注释吃掉，见那里的说明与
+// `tests/source-utils.test.ts`）。
 
 /** 取某个导出函数的函数体源码，已剥注释 */
 function functionBody(src: string, signature: string): string {

@@ -3,6 +3,7 @@
   "version": "0.3.0",
   "description": "Virtual Code Agent - LangGraph.js 驱动的编码 Agent（TS 重写版）",
   "type": "module",
+  "main": "electron/dist/main.cjs",
   "bin": {
     "vca": "./dist/main.js"
   },
