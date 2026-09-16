@@ -15,7 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { blue, bold, clipToWidth, cyan, dim, displayWidth, padRight, panel, renderMarkdown, stripAnsi, yellow } from "../src/ui.js";
+import { blue, bold, clipToWidth, cyan, dim, displayWidth, padRight, panel, renderInline, renderMarkdown, renderMarkdownTable, stripAnsi, yellow } from "../src/ui.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -397,6 +397,150 @@ test("renderMarkdown: 标题 / 代码块 / 普通行的基本形态不变", () =
 });
 
 // ============================================================
+// renderMarkdown —— 表格
+// ============================================================
+//
+// 此前 `|` 表格整块原样输出。实测过的原状：同一张四行表，竖线分别落在
+// 0,7,14,21 / 0,13,22,31 / 0,9,19,26 列 —— Markdown 原文按**码元**补空格，
+// 而中文一个字占 2 列，面板的右边框又按显示宽度算，两者叠加，表就散了。
+
+/** 一行里每个 `|` 所在的列（按显示宽度累计，ANSI 不计） */
+function barCols(line: string): number[] {
+  const cols: number[] = [];
+  let w = 0;
+  for (const ch of stripAnsi(line)) {
+    if (ch === "|") cols.push(w);
+    w += displayWidth(ch);
+  }
+  return cols;
+}
+
+const TABLE_MD = [
+  "| 项目 | 类型 | 说明 |",
+  "|---|---|---|",
+  "| foo | string | 第一个参数，必填 |",
+  "| barbazlong | number | 第二个 |",
+  "| 中文名 | boolean | 可选 |",
+].join("\n");
+
+test("★ renderMarkdown: 表格里中文列也对齐（每行竖线落在同一列）", () => {
+  const lines = renderMarkdown(TABLE_MD).split("\n");
+  const first = barCols(lines[0]);
+  assert.ok(first.length >= 4, `没渲染成表格：${JSON.stringify(lines[0])}`);
+  for (const l of lines) {
+    assert.deepEqual(barCols(l), first, `竖线没对齐：${JSON.stringify(stripAnsi(l))}`);
+  }
+  // 竖线对齐了但行尾多一截空格，在面板里看仍然歪 —— 宽度也要一致
+  assert.deepEqual(distinctWidths(lines), [displayWidth(lines[0])], widthReport(lines));
+});
+
+test("renderMarkdown: 表格分隔行按列宽重画，不是原样打出 `---`", () => {
+  const lines = renderMarkdown(TABLE_MD).split("\n");
+  // 原样透传的话，这一行会与 Markdown 原文逐字相同（`|---|---|---|`）——
+  // 而列宽是 10 / 7 / 16，分隔线必须跟着变长才对得上。
+  assert.notEqual(
+    stripAnsi(lines[1]),
+    "|---|---|---|",
+    "分隔行原样输出了，没按列宽重画"
+  );
+  assert.deepEqual(barCols(lines[1]), barCols(lines[0]), "分隔行的竖线没跟表头对齐");
+  assert.ok(stripAnsi(lines[1]).includes("-----"), `分隔行应当按列宽补长：${JSON.stringify(stripAnsi(lines[1]))}`);
+  // 表头加粗：一眼能分出表头与数据行
+  assert.ok(lines[0].includes("\x1b[1m"), "表头应当加粗");
+});
+
+test("★ renderMarkdownTable: 输出仍是合法表格 —— 已经对齐，再渲染一遍不再变", () => {
+  const once = renderMarkdown(TABLE_MD);
+  // 去掉颜色再喂回去：等价于「从终端复制出来粘回 Markdown 文件」
+  const twice = renderMarkdownTable(stripAnsi(once).split("\n"));
+  assert.notEqual(twice, null, "自己渲染出来的表格自己认不出来");
+  assert.equal(stripAnsi(twice!.join("\n")), stripAnsi(once), "已经对齐的表格再渲染一遍内容变了");
+});
+
+test("renderMarkdown: 分隔行格数与表头不一致时不当表格（宁可原样输出）", () => {
+  const md = "| a | b |\n|---|---|---|\n| 1 | 2 |";
+  assert.equal(renderMarkdown(md), md, "列数对不上的表格应当原样输出，而不是猜哪列到哪");
+  assert.equal(renderMarkdownTable(["| a | b |", "|---|---|---|"]), null);
+  assert.equal(renderMarkdownTable(["| a | b |"]), null, "只有表头、没有分隔行不算表");
+  assert.equal(renderMarkdownTable([]), null, "空输入不崩");
+});
+
+test("★ renderMarkdown: 带竖线的命令行不会被当成表格吃掉", () => {
+  // 真实场景：`ps aux | grep node |` 这类命令经常以 `|` 收尾，挨着的两条又常常
+  // 一条带 `-`（`-5` / `--oneline`）。判据一旦放宽成「以竖线开头结尾」就够了，
+  // 这两行会被拼成一张两列表格 —— 命令变成表头，参数变成数据。
+  const md = [
+    "| 字段 | 含义 |",
+    "|---|---|",
+    "| pid | 进程号 |",
+    "",
+    "ps aux | grep node |",
+    "git log --oneline -5 | head |",
+  ].join("\n");
+  const out = renderMarkdown(md).split("\n");
+  assert.equal(out[out.length - 1], "git log --oneline -5 | head |", "命令行被当成表格吃掉了");
+  assert.equal(out[out.length - 2], "ps aux | grep node |", "命令行被当成表格吃掉 / 被并进表格了");
+  assert.equal(out[out.length - 3], "", "表格后的空行不该被吃掉");
+
+  // 分隔行的判据必须是「只有 | 空格 : - 这几种字符」。
+  // 只要求「像表格行 + 含 -」的话，上面那两行就会通过 —— 这条断言盯的就是这个边界。
+  assert.equal(
+    renderMarkdownTable(["ps aux | grep node |", "git log --oneline -5 | head |"]),
+    null,
+    "两行命令行被当成了表格（分隔行判据太松）"
+  );
+  assert.equal(renderMarkdownTable(["| a | b |", "| x-y | z |"]), null, "带字母的行不算分隔行");
+
+  // 没有分隔行就压根不是表格
+  const md2 = ["ps aux | grep node |", "第二行普通文本 | 也带竖线 |"].join("\n");
+  assert.equal(renderMarkdown(md2), md2, "没有分隔行就不该有表格");
+});
+
+test("renderMarkdown: 代码块里的表格原样保留（不渲染）", () => {
+  const md = ["```", "| a | b |", "|---|---|", "| 1 | 2 |", "```"].join("\n");
+  const lines = renderMarkdown(md).split("\n");
+  assert.deepEqual(lines, [dim("| a | b |"), dim("|---|---|"), dim("| 1 | 2 |")]);
+});
+
+test("renderMarkdown: 表格支持 :-- / :-: / --: 三种对齐", () => {
+  const md = ["| 左边列 | 中间列 | 右边列 |", "|:---|:--:|---:|", "| a | b | c |"].join("\n");
+  const lines = renderMarkdown(md).split("\n");
+  // 列宽都是 6：左对齐右边补空格、居中两侧各 2 与 3、右对齐左边补 5
+  assert.equal(stripAnsi(lines[2]), "| a      |   b    |      c |", `对齐没生效：${JSON.stringify(stripAnsi(lines[2]))}`);
+  assert.deepEqual(distinctWidths(lines), [displayWidth(lines[0])], widthReport(lines));
+});
+
+test("★ renderMarkdown: 表格单元格的行内代码 / 加粗与正文同一套规则", () => {
+  const md = ["| 项 | 值 |", "|---|---|", "| `npm run x` | **必填** |"].join("\n");
+  const row = stripAnsi(renderMarkdown(md)).split("\n")[2];
+  assert.equal(row.includes("`"), false, "单元格里的行内代码没被渲染成颜色");
+  const colored = renderMarkdown(md).split("\n")[2];
+  assert.ok(colored.includes(cyan("npm run x")), "单元格里的行内代码应当是青色（与正文同一套规则）");
+  assert.ok(colored.includes(bold("必填")), "单元格里的加粗应当加粗");
+});
+
+test("renderMarkdown: 表格里的 \\| 是转义过的竖线，不该把一格切成两格", () => {
+  const md = ["| 表达式 | 含义 |", "|---|---|", "| a \\| b | 或 |"].join("\n");
+  const lines = renderMarkdown(md).split("\n");
+  const bare = stripAnsi(lines[2]);
+  assert.ok(bare.includes("a | b"), `转义的竖线应当还原成竖线本身：${JSON.stringify(bare)}`);
+  // 表头 3 个边界竖线，数据行只该多出「格内那一个字面竖线」= 4。
+  // 不处理转义的话这里会等于 3，同时格数从 2 变 3 —— 「或」会被挤到不存在的列里静默丢掉。
+  assert.equal(
+    barCols(bare).length,
+    barCols(stripAnsi(lines[0])).length + 1,
+    `格数变了：转义的竖线被当成列分隔符 —— ${JSON.stringify(bare)}`
+  );
+});
+
+test("renderMarkdown: 空单元格与尾随空格不破坏对齐", () => {
+  const md = ["| a | b |  |", "|---|---|---|", "|  | 2 | 3 |", "| 1 |  |  |"].join("\n");
+  const lines = renderMarkdown(md).split("\n");
+  assert.deepEqual(distinctWidths(lines), [displayWidth(lines[0])], widthReport(lines));
+  assert.deepEqual(barCols(lines[3]), barCols(lines[0]));
+});
+
+// ============================================================
 // 结构锁 —— 扫源码前必须先剥注释
 // ============================================================
 //
@@ -417,10 +561,10 @@ function functionBody(src: string, signature: string): string {
   return stripComments(src.slice(start, next > start ? next : undefined));
 }
 
-test("★ 结构锁: renderMarkdown 的行内代码与加粗只扫一次", () => {
+test("★ 结构锁: 行内代码与加粗（renderInline，正文与表格共用）只扫一次", () => {
   const body = functionBody(
     fs.readFileSync(path.join(ROOT, "src", "ui.ts"), "utf-8"),
-    "export function renderMarkdown("
+    "export function renderInline("
   );
   const WHY = "上一次 replace 插入的 ANSI 会被下一次当成正文（反引号里的 ** 会被加粗）";
 
@@ -433,6 +577,40 @@ test("★ 结构锁: renderMarkdown 的行内代码与加粗只扫一次", () =>
   // 反向：一旦有人改回两次 replace，源码里就会出现「只匹配加粗」或「只匹配行内代码」的独立正则
   assert.equal(body.includes("**([^*]+)**"), false, `又出现只匹配加粗的独立正则 —— ${WHY}`);
   assert.equal(body.includes("`([^`]+)`"), false, `又出现只匹配行内代码的独立正则 —— ${WHY}`);
+});
+
+test("★ 结构锁: 行内渲染只有一份，renderMarkdown 不得自己再写一份", () => {
+  const src = fs.readFileSync(path.join(ROOT, "src", "ui.ts"), "utf-8");
+  const body = functionBody(src, "export function renderMarkdown(");
+
+  // 表格单元格与正文必须共用同一条规则。各写一份的话，同一段 Markdown
+  // 在正文里是青色、在表格里就是原文 —— 而两边都不会报错。
+  assert.equal(
+    body.includes("`[^`]+`"),
+    false,
+    "renderMarkdown 里又出现了行内渲染正则 —— 它应该只调 renderInline"
+  );
+  assert.ok(body.includes("renderInline("), "renderMarkdown 必须通过 renderInline 渲染普通行");
+  // 表格那侧同理：列宽必须由 renderMarkdownTable 统一算，不能在这里另算一遍
+  assert.ok(body.includes("renderMarkdownTable("), "表格分支必须调 renderMarkdownTable");
+});
+
+test("★ 结构锁: 表格列宽按显示宽度算，且不再有第二套 Markdown 渲染入口", () => {
+  const src = fs.readFileSync(path.join(ROOT, "src", "ui.ts"), "utf-8");
+  const table = functionBody(src, "export function renderMarkdownTable(");
+
+  assert.ok(table.includes("displayWidth("), "列宽必须按 displayWidth 算（按 length 算中文列会歪）");
+  assert.equal(
+    /\.length\s*[-+*/)]/.test(table.replace(/rows\.length|header\.length|cols|sep\.length|lines\.length/g, "")),
+    false,
+    "表格里不该拿 .length 当宽度参与运算"
+  );
+  assert.ok(table.includes("padCell("), "补空格必须走 padCell（displayWidth 口径）");
+
+  // 全文件只允许一个 markdown 渲染入口：renderMarkdown。
+  // 新增第二个（比如给表格单独开一个）必然漂移。
+  const entries = src.match(/export function render\w*\(\s*text:/g) ?? [];
+  assert.deepEqual(entries, ["export function renderMarkdown(text:"], `markdown 渲染入口多了一个：${entries}`);
 });
 
 test("★ 结构锁: clipToWidth 必须按 SGR 切段，不得对整个字符串逐字符遍历", () => {

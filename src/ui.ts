@@ -192,14 +192,126 @@ export function panel(content: string, title?: string, borderStyle: "green" | "b
 // Markdown 简易渲染
 // ============================================================
 
-/** 简单 Markdown 高亮: 标题加粗、代码块 dim、行内代码 cyan */
+/** 是不是表格行：**必须以 `|` 开头、以 `|` 结尾**。`ps aux | grep node` 不满足，所以不会被当成表 */
+function isTableRow(line: string): boolean {
+  const t = line.trim();
+  return t.length >= 2 && t.startsWith("|") && t.endsWith("|");
+}
+
+/** 分隔行：`|---|:--:|` 这类。必须**成对**出现才能确认「这是一张表」 */
+function isTableSeparator(line: string): boolean {
+  const t = line.trim();
+  return isTableRow(t) && /^[|\s:-]+$/.test(t) && t.includes("-");
+}
+
+/** 按 `|` 切格；`\|` 是转义过的竖线，先占位再切，免得把一格切成两格 */
+function splitTableRow(line: string): string[] {
+  const body = line.trim().replace(/^\|/, "").replace(/\|$/, "");
+  return body
+    .replace(/\\\|/g, "\u0000")
+    .split("|")
+    .map((c) => c.replace(/\u0000/g, "|").trim());
+}
+
+type ColAlign = "left" | "center" | "right";
+
+/** 从分隔行读对齐方式：`:--` 左、`:-:` 居中、`--:` 右，默认左 */
+function parseAligns(sep: readonly string[]): ColAlign[] {
+  return sep.map((s) => {
+    const left = s.startsWith(":");
+    const right = s.endsWith(":");
+    if (left && right) return "center";
+    if (right) return "right";
+    return "left";
+  });
+}
+
+/** 按**显示宽度**补空格到指定列宽。`padEnd` 按码元算，中文列会歪 */
+function padCell(text: string, width: number, align: ColAlign): string {
+  const gap = width - displayWidth(text);
+  if (gap <= 0) return text;
+  if (align === "right") return " ".repeat(gap) + text;
+  if (align === "center") {
+    const l = Math.floor(gap / 2);
+    return " ".repeat(l) + text + " ".repeat(gap - l);
+  }
+  return text + " ".repeat(gap);
+}
+
+/**
+ * 把一块 Markdown 表格渲染成**列对齐**的文本表格。
+ *
+ * 为什么要做：模型回答里表格很常见（对比、参数清单、排期），但 Markdown 表格的
+ * 原始文本是按**码元**对齐的 —— 中文一个字占 2 列却只占 1 个码元，加上本文件
+ * 渲染时还会往里插 ANSI 序列（占 0 列），于是整张表的竖线每行都落在不同列
+ * （实测同一张表四行，竖线分别在 0,7,14,21 / 0,13,22,31 / 0,9,19,26 列）。
+ * 而 `panel` 的右边框是按显示宽度算的，两者一叠加，表就彻底散了。
+ *
+ * 输出**仍然是合法的 Markdown 表格**（还是 `|` 与 `-`，只是补齐了空格）：
+ * 从终端里复制出去粘回 Markdown 文件依然是一张表。换成 `┼─` 这类绘制字符好看，
+ * 但粘出去就只剩花纹了。
+ *
+ * @param lines 表格的原始行（含表头与分隔行），**只含这张表**
+ * @returns 渲染后的行；不是合法表格时返回 `null`，由调用方原样输出，不做猜测
+ */
+export function renderMarkdownTable(lines: readonly string[]): string[] | null {
+  const rows = lines.map((l) => l.trimEnd());
+  if (rows.length < 2) return null;
+  if (!isTableRow(rows[0]) || !isTableSeparator(rows[1])) return null;
+  if (!rows.slice(2).every(isTableRow)) return null;
+
+  const header = splitTableRow(rows[0]);
+  const sep = splitTableRow(rows[1]);
+  // 分隔行的格数与表头不一致就不是一张表（宁可原样输出，也别猜哪列该到哪）
+  if (header.length === 0 || header.length !== sep.length) return null;
+
+  const cols = header.length;
+  const body = rows.slice(2).map(splitTableRow);
+  // 列宽按**渲染后**的显示宽度算：单元格里的 `code` / 加粗会变成 ANSI 序列，
+  // 序列占 0 列但占码元 —— 量错了列就白对。
+  const cells: string[][] = [header, ...body].map((row) =>
+    Array.from({ length: cols }, (_, i) => renderInline(row[i] ?? ""))
+  );
+  const widths = Array.from({ length: cols }, (_, i) =>
+    Math.max(...cells.map((row) => displayWidth(row[i])))
+  );
+  const aligns = parseAligns(sep);
+  const draw = (row: readonly string[]): string =>
+    "| " + row.map((c, i) => padCell(c, widths[i], aligns[i])).join(" | ") + " |";
+
+  return [
+    draw(cells[0].map((c) => bold(c))),
+    "|" + widths.map((w) => "-".repeat(w + 2)).join("|") + "|",
+    ...cells.slice(1).map(draw),
+  ];
+}
+
+/**
+ * 行内代码 + 加粗：**一次扫描**，用同一条正则的交替分支，谁先出现就处理谁。
+ *
+ * 不能写成两次 replace（踩过）：第一次替换会把 ANSI 序列写进中间结果，
+ * 第二次的正则再扫一遍时，就把**行内代码里的字面星号**也当成加粗标记了 ——
+ * `` 用 `**p**` 表示加粗 `` 里的 `**p**` 会变成「加粗的 p」，
+ * 而它明明写在反引号里、本该原样显示；`` `a**b**c` `` 同理。
+ *
+ * 表格单元格也走这里：同一段 Markdown 在正文里是什么样，在表格里就该是什么样，
+ * 各写一份的话两边必然漂移。
+ */
+export function renderInline(line: string): string {
+  return line.replace(
+    /`[^`]+`|\*\*[^*]+\*\*/g,
+    (m: string) => (m.startsWith("`") ? cyan(m.slice(1, -1)) : bold(m.slice(2, -2)))
+  );
+}
+
+/** 简单 Markdown 高亮: 标题加粗、代码块 dim、行内代码 cyan、表格列对齐 */
 export function renderMarkdown(text: string): string {
   const lines = text.split("\n");
   let inCodeBlock = false;
   const out: string[] = [];
 
-  for (const rawLine of lines) {
-    const line = rawLine.trimEnd();
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trimEnd();
     if (line.startsWith("```")) {
       inCodeBlock = !inCodeBlock;
       continue;
@@ -212,20 +324,24 @@ export function renderMarkdown(text: string): string {
       out.push(bold(cyan(line.replace(/^#{1,6}\s/, ""))));
       continue;
     }
-    // 行内代码 + 加粗：**一次扫描**，用同一条正则的交替分支，谁先出现就处理谁。
-    //
-    // 不能写成两次 replace（踩过）：第一次替换会把 ANSI 序列写进中间结果，
-    // 第二次的正则再扫一遍时，就把**行内代码里的字面星号**也当成加粗标记了 ——
-    // `` 用 `**p**` 表示加粗 `` 里的 `**p**` 会变成「加粗的 p」，
-    // 而它明明写在反引号里、本该原样显示；`` `a**b**c` `` 同理。
-    const rendered = line.replace(
-      /`[^`]+`|\*\*[^*]+\*\*/g,
-      (m: string) => (m.startsWith("`") ? cyan(m.slice(1, -1)) : bold(m.slice(2, -2)))
-    );
-    out.push(rendered);
+    // 表格：整块吃掉一起渲染，不能一行一行过 —— 列宽要看完所有行才知道。
+    // 判据是「本行像表格行」**且**下一位是分隔行：只认竖线的话，
+    // 正好以 `|` 结尾的命令行（`... | tee out.log |`）会被整块吃成表格。
+    if (isTableRow(line)) {
+      let end = i + 2;
+      while (end < lines.length && isTableRow(lines[end].trimEnd())) end++;
+      const table = renderMarkdownTable(lines.slice(i, end).map((l) => l.trimEnd()));
+      if (table) {
+        out.push(...table);
+        i = end - 1;
+        continue;
+      }
+    }
+    out.push(renderInline(line));
   }
   return out.join("\n");
 }
+
 
 // ============================================================
 // 交互式输入
