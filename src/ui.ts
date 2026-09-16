@@ -125,16 +125,35 @@ export function renderMarkdown(text: string): string {
 // 交互式输入
 // ============================================================
 
+export interface PromptOptions {
+  /** 供 ↑/↓ 翻回的历史，**最新在前**（与 Node readline 的约定一致） */
+  history?: readonly string[];
+  /** Tab 补全回调，签名与 Node readline 的 completer 相同 */
+  completer?: (line: string) => [string[], string];
+}
+
 /**
  * 提示用户输入。Ctrl+C / EOF 返回 null。
  * 每次创建独立的 readline 接口，避免与 agent 运行时的 SIGINT 冲突。
  */
-export function promptUser(query: string): Promise<string | null> {
+export function promptUser(
+  query: string,
+  opts: PromptOptions = {}
+): Promise<string | null> {
   return new Promise((resolve) => {
+    const history = opts.history ?? [];
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
       terminal: true,
+      // ⚠ 这里必须给**副本**：Node 的 readline 不复制传入的数组，而是拿同一个
+      // 引用当历史（实测 `rl.history === 传入的数组` 为 true），新输入直接
+      // unshift 进去。历史由 main.ts 自己记录并落盘，不希望被它顺手改动。
+      // 每次 prompt 只取一行输入，快照完全够用。
+      history: [...history],
+      // 0 在 Node 里等于「关掉历史」，所以没有历史时也得给 1
+      historySize: Math.max(history.length, 1),
+      completer: opts.completer,
     });
     let settled = false;
     const done = (v: string | null): void => {

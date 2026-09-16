@@ -73,6 +73,7 @@ export function renderHelp(verbose = false): string[] {
     lines.push("");
     lines.push("提示: 大文件会自动分块，Agent 会用 chunk=N 分块读取");
     lines.push("Ctrl+C 可在 Agent 执行过程中打断");
+    lines.push("↑/↓ 翻回敲过的内容（跨会话保留），Tab 补全命令、路径、配置键、模型名");
   }
   return lines;
 }

@@ -21,6 +21,7 @@
     "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
     "test": "node --import tsx --test tests/*.test.ts",
     "test:cli": "node --import tsx --test tests/cli-spawn.test.ts",
+    "test:input": "node --import tsx --test tests/input-history.test.ts tests/completer.test.ts",
     "check": "npm run typecheck:test && npm test",
 
     "electron:dev": "node scripts/build-electron.mjs --watch",

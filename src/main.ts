@@ -7,7 +7,7 @@ import path from "node:path";
 import { pathToFileURL, fileURLToPath } from "node:url";
 import { SystemMessage } from "@langchain/core/messages";
 
-import { Config, CONFIG_FILE, EDITABLE_KEYS, SESSIONS_DIR } from "./config.js";
+import { Config, CONFIG_FILE, EDITABLE_KEYS, INPUT_HISTORY_FILE } from "./config.js";
 import { CodingAgent, createCodingAgent, makeSystemPrompt } from "./agent/graph.js";
 import { createInitialState, type AgentState } from "./agent/state.js";
 import { runAgent } from "./agent/runner.js";
@@ -29,7 +29,9 @@ import {
   magenta,
 } from "./ui.js";
 import { parseArgs, USAGE } from "./cli-args.js";
-import { renderHelp } from "./help.js";
+import { renderHelp, commandNames } from "./help.js";
+import { readHistory, pushHistory, writeHistory } from "./input-history.js";
+import { completeInput } from "./completer.js";
 import { getCurrentPlan, formatPlan } from "./tools/index.js";
 import { getAllSkills, getSkillDirs } from "./skills/manager.js";
 import { mcpManager } from "./mcp/manager.js";
@@ -457,16 +459,38 @@ async function main(): Promise<void> {
       `当前窗口: ${bold(magenta(`#${cs.windowNo}`))}\n\n` +
       `输入编程任务，Agent 将自动完成。\n` +
       `输入 ${cyan("/help")} 查看可用命令，${cyan("/cd <路径>")} 切换项目。\n` +
-      `${cyan("/new")} 开启新对话窗口。`,
+      `${cyan("/new")} 开启新对话窗口。\n` +
+      `${dim("↑/↓")} 翻回敲过的内容，${dim("Tab")} 补全命令与路径。`,
     bold("就绪"),
     "green"
   );
   print();
 
   // 6. 主事件循环
+  //
+  // 输入历史与 Tab 补全（Python 版的 input_history + VCACompleter，
+  // TS 重写时丢了 —— 裸 readline 既翻不出历史也补不了全）。
+  // 历史只在**这个循环**里记录：runAgent 内部的 ask_user 回答、打断菜单
+  // 都是过程性输入，不该混进「↑ 翻回上次敲的命令」里。
+  const inputHistory = readHistory(INPUT_HISTORY_FILE);
+  const completerContext = {
+    commands: commandNames(),            // 命令清单的唯一来源是 help.ts
+    configKeys: [...EDITABLE_KEYS].sort(), // 配置键的唯一来源是 config.ts
+    models: [] as string[],              // 每次补全时现读，支持 /model 切完立刻补得到
+    cwd: cs.workspaceDir,
+  };
+
   while (true) {
     const prompt = formatPrompt(cs.workspaceDir, cs.windowNo, cs.verbose);
-    const userInput = await promptUser(prompt);
+    const userInput = await promptUser(prompt, {
+      history: inputHistory,
+      completer: (line) =>
+        completeInput(line, {
+          ...completerContext,
+          models: Config.getModels().map((m) => m.name),
+          cwd: cs.workspaceDir,
+        }),
+    });
     setInterrupted(false);
 
     if (userInput === null) {
@@ -481,6 +505,12 @@ async function main(): Promise<void> {
 
     const input = userInput.trim();
     if (!input) continue;
+
+    // 记一条历史并落盘（命令也记 —— shell 就是这么做的）。
+    // pushHistory 会挡掉空行与连续重复，返回 false 时不必重写文件。
+    if (pushHistory(inputHistory, input)) {
+      writeHistory(INPUT_HISTORY_FILE, inputHistory);
+    }
 
     // 处理命令
     if (input.startsWith("/")) {

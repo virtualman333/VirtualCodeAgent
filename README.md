@@ -14,6 +14,7 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 - **内置工具集**（`src/tools/`）：读文件、搜索（glob / grep）、编辑、写入、执行命令（bash）、提问（ask_user）、任务计划（plan）。
 - **会话持久化**：对话自动保存，可随时 `/load` 恢复历史会话、切换工作空间。
 - **交互式打断**：执行过程中可用 `Ctrl+C` 中断；Agent 遇到歧义时通过 `ask_user` 向用户确认。
+- **交互式输入**：`↑`/`↓` 翻回敲过的内容（**跨会话保留**，与 Python 版共用同一个历史文件），`Tab` 补全命令、路径、配置键与模型名。
 - **多模型切换**：支持在 `config.json` 中配置多个模型并运行时切换（`/model`）。
 - **可扩展**：Skills 专业技能（`SKILL.md`，用户级 / 项目级目录都能发现）与 MCP 外部工具接口均已接入，Agent 侧通过 `list_skills` / `load_skill` 取用技能，MCP 工具在每轮对话时动态并入工具池。用 `/skills`、`/mcp` 查看实际发现到什么。
 
@@ -42,13 +43,17 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 │   ├── mcp/             # MCP 管理器：读配置、连 server、收集动态工具
 │   ├── skills/          # Skills 管理器：发现 / 解析 / 加载 SKILL.md
 │   ├── config.ts        # 配置加载（~/.vca/config.json）
+│   ├── paths.ts         # 路径工具（expandUser）。单独成文件是为了让 completer 不必 import config
 │   ├── cli-args.ts      # CLI 参数解析（纯函数，参数契约的唯一来源）
 │   ├── help.ts          # 斜杠命令清单（单一来源，/help 由它渲染）
+│   ├── completer.ts     # Tab 补全（纯函数：一行输入 → 候选 + 待替换的 token）
+│   ├── input-history.ts # ↑/↓ 输入历史（读写 ~/.vca/input_history）
 │   ├── ui.ts            # ANSI 颜色 / 面板 / 显示宽度
 │   ├── main.ts          # 控制台 CLI 入口
 │   ├── server.ts        # HTTP + WebSocket 服务（供 Web 使用）
 │   └── workspace*.ts    # 工作空间选择与管理
-├── tests/               # 测试：cli-args / help（纯函数） + cli-spawn（真的起子进程）
+├── tests/               # 测试：cli-args / help / completer / input-history（纯函数）
+│                        #       + cli-spawn（真的起子进程）
 ├── vscode/              # VS Code 扩展（聊天面板、AskUser 弹窗、工具调用流式展示）
 ├── web/                 # 独立 Web 聊天前端（Vue 3 + Vite）
 ├── scripts/             # 扩展构建脚本（build-extension.mjs）
@@ -134,6 +139,27 @@ npm run dev -- --version             # 查看版本号
 
 上表是分组摘要；命令清单的唯一来源是 `src/help.ts` 里的 `COMMANDS`，`/help` 的输出由它渲染，`tests/help.test.ts` 会双向比对它与 `main.ts` 里 `handleCommand` 的 `case` 分支 —— 声明了却没实现、或实现了却没声明，都会让测试变红。
 
+#### 交互式输入：↑ 历史与 Tab 补全
+
+`↑` / `↓` 翻回敲过的内容，`Tab` 补全。两样都是 Python 版原本就有、TS 重写时丢掉的，现在补回来了。
+
+| 敲到哪一步 | Tab 补什么 |
+|---|---|
+| 行首（`/`、`/he`） | 命令名。清单取自 `help.ts`，顺序与 `/help` 输出一致 |
+| `/cd ` | 目录（只列目录，不列文件；相对路径以当前工作空间为基准；`~` 原样保留，不会被展开成真实家目录） |
+| `/config ` | 子命令 `set`；再往下补 `EDITABLE_KEYS` 里的配置键（`/config set MAX` → 两个 `MAX_*`） |
+| `/model ` | 已配置的模型名，顺序与 `/model` 的编号一致 |
+
+三条约定：
+
+- **只在命令上下文里补**。普通输入是给 Agent 的任务描述（自然语言），在那种句子里到处插路径补全只会碍事，所以不以 `/` 开头的行一律不给候选。
+- **命令清单不另抄一份**。候选里的命令名、配置键、模型名全部由调用方注入，都取自各自的单一来源（`help.ts` / `EDITABLE_KEYS` / `Config`）—— 抄一份必然漂移：加了命令却忘了同步，Tab 就永远补不出它。
+- **候选最多 40 条**。在盘符根目录按一下 Tab 不该把整屏刷掉。
+
+历史存在 `~/.vca/input_history`，**与 Python 版（prompt_toolkit 的 FileHistory）是同一个文件**，所以那边留下的历史这边直接能读回来，不用迁移。规则：最多 500 条、空行不记、与上一条完全相同不记（按住回车不会把历史刷满）、多行粘贴压成单行。文件里最早在前（可追加），内存里最新在前（`↑` 从最近一条往前翻）。
+
+> 顺带一个已知限制：`promptUser` 每次读取一行后就关掉 readline，所以**把多行文本一次性粘贴进输入框只有第一行会生效**。这与本轮改动无关（原本如此），记在这里免得下次又当成新 bug 查一遍。
+
 ### B. Web 面板
 
 先构建前端，再启动服务：
@@ -213,13 +239,16 @@ npm run build         # 编译 TS → dist/
 npm run start         # 运行编译后的 CLI (node dist/main.js)
 npm test              # 跑全部测试 (node --test + tsx)
 npm run test:cli      # 只跑入口冒烟测试
+npm run test:input    # 只跑输入历史与 Tab 补全
 npm run check         # typecheck:test + test
 ```
 
 测试分两层：
 
-- `tests/cli-args.test.ts` / `tests/help.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性。
+- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据。
 - `tests/cli-spawn.test.ts` —— 入口冒烟层。**真的把 CLI 当子进程跑起来**，断言 stdout / stderr / 退出码。这一层存在的理由：上一轮那个「入口守卫在 Windows 上永不成立、`npm run dev` 一行输出都没有」的故障，在所有纯函数测试里都是绿的 —— 被测函数一个都没被调用。判据很朴素：**stdout 是空的就说明 `main()` 压根没跑**。
+
+至于 `↑` 与 `Tab` 这类**真终端按键行为**，不在自动化范围内：用管道喂 stdin 能验到「历史被正确读写、命令正常执行」，按键本身需要 TTY，只能本地手工过一遍。
 
 调试 VS Code 扩展：构建前端与扩展后，在 VS Code 中按 **F5** 启动扩展开发宿主。
 

@@ -5,6 +5,8 @@ import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 
+import { expandUser } from "./paths.js";
+
 // ============================================================
 // 路径常量
 // ============================================================
@@ -13,6 +15,13 @@ export const VCA_DIR = path.join(os.homedir(), ".vca");
 export const CONFIG_FILE = path.join(VCA_DIR, "config.json");
 export const HISTORY_FILE = path.join(VCA_DIR, "workspace_history.json");
 export const SESSIONS_DIR = path.join(VCA_DIR, "sessions");
+/**
+ * 输入历史（↑/↓ 翻回敲过的内容）。
+ * 路径与 Python 版（prompt_toolkit 的 FileHistory）**完全相同**，
+ * 所以那边留下的历史这边直接能读回来，不需要迁移。
+ * 读写逻辑在 ./input-history.js。
+ */
+export const INPUT_HISTORY_FILE = path.join(VCA_DIR, "input_history");
 export const SKILLS_DIR = path.join(VCA_DIR, "skills");
 export const MCP_CONFIG_FILE = path.join(VCA_DIR, "mcp.json");
 
@@ -273,10 +282,7 @@ export const Config = {
   },
 };
 
-export function expandUser(p: string): string {
-  if (p === "~") return os.homedir();
-  if (p.startsWith("~/") || p.startsWith("~\\")) {
-    return path.join(os.homedir(), p.slice(2));
-  }
-  return p;
-}
+// expandUser 的实现搬去了 ./paths.js（那里是叶子模块，不 import 本文件，
+// 于是 completer 之类只想补个路径的模块不会连带触发下面的 ensureConfig()）。
+// 这里 re-export，对外的 API 与以前一模一样。
+export { expandUser };

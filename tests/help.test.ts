@@ -116,12 +116,18 @@ test("★ 说明列必须对齐（按显示宽度补白，中文用法不会把�
   }
 });
 
-test("verbose 只多出提示两行，命令本身一条不少", () => {
+test("verbose 只多出提示区，命令本身一条不少", () => {
   const brief = renderHelp(false).map(stripAnsi);
   const full = renderHelp(true).map(stripAnsi);
   assert.ok(full.length > brief.length, "verbose 没有多出内容");
   for (const l of brief) assert.ok(full.includes(l), `verbose 丢了一行: ${l}`);
   assert.ok(full.some((l) => l.includes("Ctrl+C")), "verbose 缺 Ctrl+C 提示");
+  assert.ok(full.some((l) => l.includes("Tab")), "verbose 缺 Tab 补全提示");
+  // 多出来的必须全是提示，不能混进命令行（混进去会让上面那条「命令一条不少」形同虚设）
+  const extra = full.filter((l) => !brief.includes(l));
+  for (const l of extra) {
+    assert.equal(l.startsWith("/"), false, `提示区里混进了一行命令: ${l}`);
+  }
 });
 
 test("displayWidth 对中文算两列（对齐逻辑的基础）", () => {
