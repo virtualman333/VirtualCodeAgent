@@ -20,7 +20,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { stripAnsi } from "../src/ui.js";
+import { displayWidth, stripAnsi } from "../src/ui.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const ENTRY = path.join(ROOT, "src", "main.ts");
@@ -276,4 +276,30 @@ test("/input：命令本身也进历史（shell 的惯例），下一轮 /input 
   const file = fs.readFileSync(HISTORY_FILE(home), "utf-8").trimEnd().split(/\r?\n/);
   assert.equal(file[file.length - 1], "/input 2", "刚敲的命令应该被追加到文件末尾（文件里最早在前）");
   assert.equal(file.length, SEED.length + 1);
+});
+
+// ============================================================
+// 启动面板对齐 —— 只能在这里锁
+// ============================================================
+//
+// 面板的宽度取决于「终端列数 + 内容里每行的中文数量」，纯函数测试只能喂假数据；
+// 而真正的用户第一眼看到的就是这块框。原先 panel 用 `stripAnsi(l).length` 量
+// 行宽，中文一个占 2 列却只占 1 个码元 —— 右边框于是逐行忽左忽右，且不报错。
+// 这里直接跑真入口，量输出里每一条框线的显示宽度。
+
+test("★ 启动面板：输出里每一条框线等宽（真实入口，不是喂假数据）", () => {
+  const home = readyHome();
+  const r = runCli(["-w", home], home, "");
+  assert.equal(r.status, 0, `stderr=${r.stderr}`);
+
+  const boxed = r.stdout.split("\n").filter((l) => /^[│┌└]/.test(stripAnsi(l)));
+  assert.ok(boxed.length >= 9, `只认出 ${boxed.length} 条框线 —— 判定条件大概失效了，或面板没画出来`);
+  assert.match(stripAnsi(boxed[0]), /^┌─ 就绪 /, "第一条框线应是「就绪」面板的上边框");
+
+  const widths = [...new Set(boxed.map((l) => displayWidth(l)))];
+  assert.equal(
+    widths.length,
+    1,
+    `启动面板行宽不一致（${widths.join(" / ")}）：\n${boxed.map((l) => `${displayWidth(l)} | ${stripAnsi(l)}`).join("\n")}`
+  );
 });

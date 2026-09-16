@@ -52,8 +52,8 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 │   ├── main.ts          # 控制台 CLI 入口
 │   ├── server.ts        # HTTP + WebSocket 服务（供 Web 使用）
 │   └── workspace*.ts    # 工作空间选择与管理
-├── tests/               # 测试：cli-args / help / completer / input-history（纯函数）
-│                        #       + cli-spawn（真的起子进程）
+├── tests/               # 测试：cli-args / help / completer / input-history / ui（纯函数）
+│                        #       + cli-spawn（真的起子进程，含启动面板对齐）
 ├── vscode/              # VS Code 扩展（聊天面板、AskUser 弹窗、工具调用流式展示）
 ├── web/                 # 独立 Web 聊天前端（Vue 3 + Vite）
 ├── scripts/             # 扩展构建脚本（build-extension.mjs）
@@ -186,6 +186,22 @@ npm run dev -- --version             # 查看版本号
 
 > 顺带一个已知限制：`promptUser` 每次读取一行后就关掉 readline，所以**把多行文本一次性粘贴进输入框只有第一行会生效**。这与本轮改动无关（原本如此），记在这里免得下次又当成新 bug 查一遍。
 
+#### 面板对齐：宽度一律按**显示宽度**算
+
+`src/ui.ts` 里的 `displayWidth` 是唯一的口径：CJK 与常见绘文字算 2 列，ANSI 序列不计。`padRight`、`clipToWidth`、命令表的说明列、`panel` 全走它。
+
+这里踩过一个**不出声**的坑，而且是同一个坑的两种形态：
+
+- **补白按码元算**。`panel` 原先用 `stripAnsi(l).length`，而一个汉字占 2 列却只占 1 个码元 —— 启动时那个「就绪」面板（工作空间路径、`/help` 说明全是中文）右边框随每行的中文数量忽左忽右，实测上下边框 34 列、正文行 34~50 列，**不报任何错**。
+- **宽度算小了**。宽度被量少 → `inner` 比正文还窄 → 本该完整显示的行被截断加省略号。行与行之间**仍然是等宽的**，看的人只会发现自己的路径少了半截。
+
+两条约定：
+
+- **正文行与标题行的边框开销不一样**：正文是 `│ ` + 内容 + ` │`（4 列），标题是 `┌─ ` + 标题 + ` ` + 补线 + `┐`（5 列）。两者分别算，否则标题那行永远宽 1 列。
+- **终端比内容窄时才截断**，给一个带 `…` 的整齐框；折行会让下边框跑到屏幕外，比截断更难看出问题。
+
+`⚡` `✅` `⚠` 这类 `U+2600–U+27BF` 的符号**按 1 列算**（有 emoji 呈现也有文本呈现，各家终端宽度不一致，宁可算 1 也不乱猜）；本仓库只把它们用在自然句子里，不进方框。这条与「📋 算 2 列」一样各有测试钉着，免得被当成漏写而改掉。
+
 ### B. Web 面板
 
 先构建前端，再启动服务：
@@ -271,8 +287,8 @@ npm run check         # typecheck:test + test
 
 测试分两层：
 
-- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据。
-- `tests/cli-spawn.test.ts` —— 入口冒烟层。**真的把 CLI 当子进程跑起来**，断言 stdout / stderr / 退出码。这一层存在的理由：上一轮那个「入口守卫在 Windows 上永不成立、`npm run dev` 一行输出都没有」的故障，在所有纯函数测试里都是绿的 —— 被测函数一个都没被调用。判据很朴素：**stdout 是空的就说明 `main()` 压根没跑**。
+- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` / `tests/ui.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则、控制台宽度的口径（`panel` 每一行的显示宽度只有一个值、窄终端才截断、`📋` 算 2 列而 `⚡` 算 1 列）。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据。
+- `tests/cli-spawn.test.ts` —— 入口冒烟层。**真的把 CLI 当子进程跑起来**，断言 stdout / stderr / 退出码。这一层存在的理由：上一轮那个「入口守卫在 Windows 上永不成立、`npm run dev` 一行输出都没有」的故障，在所有纯函数测试里都是绿的 —— 被测函数一个都没被调用。判据很朴素：**stdout 是空的就说明 `main()` 压根没跑**。启动面板的对齐也量在这里：喂假数据量不出「终端列数 + 真实内容」组合出来的宽度。
 
 至于 `↑` 与 `Tab` 这类**真终端按键行为**，不在自动化范围内：用管道喂 stdin 能验到「历史被正确读写、命令正常执行」，按键本身需要 TTY，只能本地手工过一遍。
 

@@ -10,9 +10,14 @@
  * 所以这里断言的判据统一是 `displayWidth`，不是 `length`。
  */
 import assert from "node:assert/strict";
+import fs from "node:fs";
+import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { clipToWidth, displayWidth, padRight } from "../src/ui.js";
+import { blue, bold, clipToWidth, displayWidth, padRight, panel, stripAnsi } from "../src/ui.js";
+
+const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
 test("clipToWidth: 没超就原样返回，不掺省略号", () => {
   assert.equal(clipToWidth("hello", 10), "hello");
@@ -67,4 +72,199 @@ test("对照：padRight 与 clipToWidth 用的是同一套宽度口径", () => {
   const padded = padRight(s, 10);
   assert.equal(displayWidth(padded), 10);
   assert.equal(clipToWidth(padded, 10), "中文abc", "补出来的空格在截断时被压掉了，但不该改变内容");
+});
+
+// ============================================================
+// panel —— 方框里每一行都必须等宽
+// ============================================================
+//
+// 上一个是「截断按码元切」，这里是同一个陷阱的第二种形态：**补白按码元算**。
+// 原先 panel 用的是 `stripAnsi(line).length`，而同文件的 renderHelp 早就在用
+// `displayWidth` —— 于是启动时那个「就绪」面板（工作空间路径、/help 说明全是
+// 中文）右边框随着每行的中文数量忽左忽右，而且不报任何错。
+//
+// 断言口径：把 panel 的输出抓下来，量**每一行的显示宽度**，要求只有唯一值。
+// 不去写死「应该是 50 列」—— 那样改一次宽度就要改一次测试。
+
+interface CapturedStdout {
+  write: (chunk: string) => boolean;
+  columns?: number;
+}
+
+/**
+ * 抓 panel 写出的所有行。
+ * `cols` 模拟终端列数（面板据此决定宽度上限与是否截断）。
+ */
+function drawPanel(content: string, title: string | undefined, cols: number): string[] {
+  const out = process.stdout as unknown as CapturedStdout;
+  const hadColumns = Object.getOwnPropertyDescriptor(out, "columns");
+  const origWrite = out.write;
+  const chunks: string[] = [];
+
+  Object.defineProperty(out, "columns", { value: cols, configurable: true, writable: true });
+  out.write = (chunk: string): boolean => {
+    chunks.push(String(chunk));
+    return true;
+  };
+  try {
+    panel(content, title, "green");
+  } finally {
+    out.write = origWrite;
+    if (hadColumns) Object.defineProperty(out, "columns", hadColumns);
+    else delete out.columns;
+  }
+
+  const text = chunks.join("");
+  assert.ok(text.endsWith("\n"), "panel 的每一行都应以换行结尾（否则光标会停在框线上）");
+  const lines = text.slice(0, -1).split("\n");
+  assert.ok(lines.length >= 2, `panel 至少该有上下两条边框，实际只写了 ${lines.length} 行`);
+  return lines;
+}
+
+/** 行宽不一致时的诊断信息 —— 直接看出是哪一行把框顶歪了 */
+function widthReport(lines: string[]): string {
+  return lines.map((l, i) => `  ${i} | ${String(displayWidth(l)).padStart(4)} | ${stripAnsi(l)}`).join("\n");
+}
+
+function distinctWidths(lines: string[]): number[] {
+  return [...new Set(lines.map((l) => displayWidth(l)))];
+}
+
+test("★ panel: 每一行显示宽度相同（中文不能把右边框顶歪）", () => {
+  // 内容照抄 main.ts 里那个真实启动面板
+  const lines = drawPanel(
+    "工作空间: /tmp/proj\n" +
+      "当前窗口: #1\n\n" +
+      "输入编程任务，Agent 将自动完成。\n" +
+      "输入 /help 查看可用命令，/cd <路径> 切换项目。\n" +
+      "↑/↓ 翻回敲过的内容，Tab 补全命令与路径。",
+    "就绪",
+    120
+  );
+  assert.deepEqual(distinctWidths(lines), [displayWidth(lines[0])], `面板行宽不一致：\n${widthReport(lines)}`);
+  assert.equal(lines.length, 8, "6 行正文 + 上下两条边框");
+});
+
+test("★ panel: 终端够宽时一行内容都不能少（宽度算小了会静默截断）", () => {
+  // 这条防的是「宽度算小」：内容宽度量少了 → width 变小 → inner 比正文还窄 →
+  // 于是本该完整显示的行被 clipToWidth 截掉一截加省略号。**行仍然是等宽的**，
+  // 上面那些断言一条都不会红 —— 用户只是发现自己的路径少了半截。
+  const content = "工作空间: /tmp/proj\n输入 /help 查看可用命令，/cd <路径> 切换项目。";
+  const lines = drawPanel(content, "就绪", 120);
+  for (const raw of content.split("\n")) {
+    assert.ok(
+      lines.some((l) => stripAnsi(l).includes(raw)),
+      `面板里找不到完整的一行「${raw}」—— 宽度被算小了，内容被截断吃掉\n${widthReport(lines)}`
+    );
+  }
+  assert.equal(lines.some((l) => l.includes("…")), false, "终端 120 列装得下，不该出现截断标记");
+});
+
+test("★ panel: 有标题时标题行与正文行同宽（两处边框开销差 1 列）", () => {
+  // 正文 `│ ` + 内容 + ` │` → 4 列开销；标题 `┌─ ` + 标题 + ` ` + 补线 + `┐` → 5 列。
+  // 把标题也按 4 列算，标题那行就永远宽 1 列 —— 这正是修复前的样子。
+  const cases: Array<[string, string]> = [
+    ["短", "很长的标题在这里"], // 宽度由标题决定
+    ["正文比标题长得多得多得多得多得多", "标题"], // 宽度由正文决定
+    ["一样长吧", "一样长"], // 两者接近
+  ];
+  for (const [content, title] of cases) {
+    const lines = drawPanel(content, title, 120);
+    assert.deepEqual(
+      distinctWidths(lines),
+      [displayWidth(lines[0])],
+      `内容「${content}」+ 标题「${title}」时行宽不一致：\n${widthReport(lines)}`
+    );
+  }
+});
+
+test("panel: 无标题时上下边框与正文同宽", () => {
+  const lines = drawPanel("abc\n中文内容", undefined, 120);
+  assert.deepEqual(distinctWidths(lines), [displayWidth(lines[0])], widthReport(lines));
+  assert.match(stripAnsi(lines[0]), /^┌─+┐$/, "无标题的上边框不该带标题槽");
+  assert.match(stripAnsi(lines[lines.length - 1]), /^└─+┘$/);
+});
+
+test("panel: 标题带绘文字时仍然等宽（📋 占 2 列）", () => {
+  // 标题要长到能越过 20 列的宽度下限，否则两个标题都会被下限截平，比不出差别
+  const withEmoji = drawPanel("内容", bold(blue("📋 剪贴板规则导出与导入")), 120);
+  assert.deepEqual(distinctWidths(withEmoji), [displayWidth(withEmoji[0])], widthReport(withEmoji));
+  // 与纯文本标题对照：宽度必须真的多了绘文字那 2 列 + 一个空格，否则说明没量进去
+  const plainTitle = drawPanel("内容", "剪贴板规则导出与导入", 120);
+  assert.equal(displayWidth(withEmoji[0]) - displayWidth(plainTitle[0]), 3, "📋（2 列）+ 一个空格（1 列）");
+});
+
+test("panel: 终端比内容窄时按显示宽度截断，且不超终端宽度", () => {
+  const lines = drawPanel("中".repeat(100), "标题", 40);
+  for (const l of lines) {
+    assert.ok(displayWidth(l) <= 40, `超出终端宽度 40：${displayWidth(l)} | ${stripAnsi(l)}`);
+  }
+  // 超宽内容必须被截断：折行会让框的下边框跑到屏幕外面，比截断更难看出问题
+  assert.ok(lines.some((l) => l.includes("…")), "超宽内容应被截断");
+  assert.deepEqual(distinctWidths(lines), [displayWidth(lines[0])], widthReport(lines));
+});
+
+test("panel: 空内容 / 空标题也给一个合法方框，不抛", () => {
+  for (const title of [undefined, "标题"]) {
+    const lines = drawPanel("", title, 120);
+    assert.equal(lines.length, 3, `应是上框 + 1 行正文 + 下框，实际 ${lines.length} 行`);
+    assert.deepEqual(distinctWidths(lines), [displayWidth(lines[0])], widthReport(lines));
+    assert.match(stripAnsi(lines[2]), /^└─+┘$/);
+  }
+});
+
+test("panel: content 传 null / undefined 不抛（旧实现是 content.split 直接 TypeError）", () => {
+  assert.doesNotThrow(() => drawPanel(null as unknown as string, undefined, 120));
+  assert.doesNotThrow(() => drawPanel(undefined as unknown as string, undefined, 120));
+});
+
+test("★ 反证：按码元长度补白会给出不等宽的行（这就是修复前的形态）", () => {
+  const lines = drawPanel("工作空间: /tmp/proj\n当前窗口: #1", "就绪", 120);
+  const width = displayWidth(lines[0]);
+  const line = "当前窗口: #1";
+  // 复刻修复前的写法：宽度按 stripAnsi(...).length 算
+  const naive = `│ ${line}${" ".repeat(Math.max(0, width - 4 - stripAnsi(line).length))} │`;
+  assert.notEqual(
+    displayWidth(naive),
+    width,
+    "按码元补白竟然也同宽 —— 说明这条反证挑的行不含中文，测试要重写"
+  );
+  // 换成显示宽度补白才对得上
+  const fixed = `│ ${line}${" ".repeat(Math.max(0, width - 4 - displayWidth(line)))} │`;
+  assert.equal(displayWidth(fixed), width);
+});
+
+test("displayWidth: 常用绘文字算 2 列（📋 / 🔌 用在面板标题上）", () => {
+  assert.equal(displayWidth("📋"), 2);
+  assert.equal(displayWidth("🔌"), 2);
+  assert.equal(displayWidth("📋 任务计划"), 11, "2 + 1 空格 + 4 个汉字 × 2");
+});
+
+test("displayWidth: 明确不覆盖 U+2600–U+27BF —— ⚡ 仍然按 1 列算", () => {
+  // 这批符号既有 emoji 呈现也有文本呈现，各家终端宽度不一致。本仓库只把它们
+  // 放在自然句子里（banner 的 ⚡），所以宁可算 1 也不乱猜。这条是钉子：
+  // 谁要改都得先承认 ⚡ 会进方框 —— 那时该做的是改用法，不是改宽度表。
+  assert.equal(displayWidth("⚡"), 1);
+  assert.equal(displayWidth("✅"), 1);
+  assert.equal(displayWidth("⚠"), 1);
+  assert.equal(displayWidth("  ⚡ Virtual Code Agent (VCA)"), 28);
+});
+
+test("★ 结构锁: panel 的宽度只走 displayWidth，不得回到 stripAnsi(...).length", () => {
+  const src = fs.readFileSync(path.join(ROOT, "src", "ui.ts"), "utf-8");
+  const start = src.indexOf("export function panel(");
+  assert.ok(start >= 0, "找不到 panel —— 改名了？这条锁需要跟着改");
+  const next = src.indexOf("export function", start + 1);
+  const body = src.slice(start, next > start ? next : undefined);
+
+  assert.equal(
+    /stripAnsi\([^)]*\)\s*\.length/.test(body),
+    false,
+    "panel 里又出现按码元算宽度了 —— 中文行会把右边框顶歪（上面那几条会红）"
+  );
+  assert.ok(
+    (body.match(/displayWidth\(/g) ?? []).length >= 3,
+    "panel 里量宽度的调用少于 3 处 —— 可能有一处又改回按码元算了"
+  );
+  assert.ok(body.includes("clipToWidth("), "panel 不再截断超宽行 —— 窄终端里框会被折行顶散");
 });

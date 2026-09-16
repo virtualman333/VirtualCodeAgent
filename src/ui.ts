@@ -28,8 +28,17 @@ export function stripAnsi(s: string): string {
 }
 
 /**
- * 显示宽度：CJK / 全角字符算 2 列，其余算 1 列，ANSI 序列不计。
- * 只为了把 help 里的命令列对齐 —— 不是完整的 Unicode 东亚洲宽度表。
+ * 显示宽度：CJK / 全角字符算 2 列，常见绘文字（emoji）也算 2 列，其余算 1 列，
+ * ANSI 序列不计。
+ *
+ * 只为了把控制台里的框与列对齐 —— 不是完整的 Unicode 东亚洲宽度表。
+ *
+ * 明确**不覆盖**的部分（终端各家的渲染并不一致，宁可算 1 也不乱猜）：
+ *   - `U+2600–U+27BF` 那一批（`⚡` `✅` `❌` `⚠`）：有 emoji 呈现也有文本呈现，
+ *     不同终端宽度不同；本仓库目前只把它们用在 `print` 的自然句子里，不进框。
+ *   - 零宽的组合附加符（如肤色修饰符 `U+1F3FB–U+1F3FF`）会被算成 2 列 ——
+ *     它们不出现于本仓库的输出。
+ * 这两条各自有一条测试钉住，免得将来被当成「忘了写」而随手改掉。
  */
 export function displayWidth(s: string): number {
   let w = 0;
@@ -47,6 +56,10 @@ export function displayWidth(s: string): number {
       (c >= 0xfe30 && c <= 0xfe6f) ||
       (c >= 0xff00 && c <= 0xff60) ||
       (c >= 0xffe0 && c <= 0xffe6) ||
+      (c >= 0x1f300 && c <= 0x1f64f) || // 绘文字：📋 在这段
+      (c >= 0x1f680 && c <= 0x1f6ff) || // 交通与地图符号：🔌 在这段
+      (c >= 0x1f900 && c <= 0x1f9ff) ||
+      (c >= 0x1fa70 && c <= 0x1faff) ||
       (c >= 0x20000 && c <= 0x3fffd);
     w += wide ? 2 : 1;
   }
@@ -89,6 +102,20 @@ export function clipToWidth(s: string, max: number): string {
 // 面板
 // ============================================================
 
+/**
+ * 画一个带标题的方框。
+ *
+ * **宽度一律按显示宽度算，不按码元。** 这里踩过：原先用的是
+ * `stripAnsi(l).length`，中文一个字占 2 列却只占 1 个码元，于是「判定没超、
+ * 实际超了一倍宽」—— 方框右边框会随着每行中文的多少忽左忽右（实测：上下边框
+ * 34 列，正文行 34~50 列），而且**不报任何错**。同文件的 `renderHelp` 早就在用
+ * `displayWidth`，只有这里漏了。
+ *
+ * 宽度还必须同时容得下**正文行**和**标题行** —— 二者的边框开销不一样：
+ *   正文 `│ ` + 内容 + ` │`      两侧共 4 列
+ *   标题 `┌─ ` + 标题 + ` ` + 补线 + `┐`  共 5 列
+ * 原先把标题也按 4 列算，于是标题那行永远比正文宽 1 列。
+ */
 export function panel(content: string, title?: string, borderStyle: "green" | "blue" | "yellow" | "magenta" | "red" = "blue"): void {
   const borderColor =
     borderStyle === "green" ? green :
@@ -97,22 +124,31 @@ export function panel(content: string, title?: string, borderStyle: "green" | "b
     borderStyle === "red" ? red : blue;
 
   const termWidth = (process.stdout.columns ?? 80) || 80;
-  const lines = content.split("\n");
-  const maxLen = Math.max(...lines.map((l) => stripAnsi(l).length), title?.length ?? 0);
-  const width = Math.min(Math.max(maxLen + 4, 20), Math.min(termWidth, 100));
+  const lines = String(content ?? "").split("\n");
+  const titleText = title ? String(title) : "";
 
-  if (title) {
-    const pad = Math.max(0, width - stripAnsi(title).length - 4);
-    print(borderColor(`┌─ ${bold(title)} ${"─".repeat(pad)}┐`));
+  const contentW = lines.reduce((m, l) => Math.max(m, displayWidth(l)), 0);
+  const titleW = titleText ? displayWidth(titleText) : 0;
+  const required = Math.max(contentW + 4, titleText ? titleW + 5 : 0, 20);
+  // 上限只用来兜住异常宽的终端；真到了装不下的程度，宁可折行也不要一个参差的框
+  const width = Math.min(required, Math.min(termWidth, 100));
+  const inner = Math.max(0, width - 4);
+
+  if (titleText) {
+    const pad = Math.max(0, width - titleW - 5);
+    print(borderColor(`┌─ ${bold(titleText)} ${"─".repeat(pad)}┐`));
   } else {
-    print(borderColor(`┌${"─".repeat(width - 2)}┐`));
+    print(borderColor(`┌${"─".repeat(Math.max(0, width - 2))}┐`));
   }
-  for (const line of lines) {
-    const len = stripAnsi(line).length;
-    const pad = Math.max(0, width - 4 - len);
-    print(`│ ${line}${" ".repeat(pad)} │`);
+
+  for (const raw of lines) {
+    // 终端比内容还窄时才截（上限算进去了）：给一个带 `…` 的整齐框，
+    // 好过一个折得看不出边在哪、还不报错的框。正常宽度下这根分支不会走到。
+    const line = displayWidth(raw) > inner ? clipToWidth(raw, inner) : raw;
+    print(`│ ${line}${" ".repeat(Math.max(0, inner - displayWidth(line)))} │`);
   }
-  print(borderColor(`└${"─".repeat(width - 2)}┘`));
+
+  print(borderColor(`└${"─".repeat(Math.max(0, width - 2))}┘`));
 }
 
 // ============================================================
