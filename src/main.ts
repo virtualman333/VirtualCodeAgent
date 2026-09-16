@@ -4,7 +4,7 @@
  */
 import fs from "node:fs";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
+import { pathToFileURL, fileURLToPath } from "node:url";
 import { SystemMessage } from "@langchain/core/messages";
 
 import { Config, CONFIG_FILE, EDITABLE_KEYS, SESSIONS_DIR } from "./config.js";
@@ -23,9 +23,13 @@ import {
   cyan,
   yellow,
   green,
+  red,
+  blue,
   bold,
   magenta,
 } from "./ui.js";
+import { parseArgs, USAGE } from "./cli-args.js";
+import { renderHelp } from "./help.js";
 import { getCurrentPlan, formatPlan } from "./tools/index.js";
 import { getAllSkills, getSkillDirs } from "./skills/manager.js";
 import { mcpManager } from "./mcp/manager.js";
@@ -33,29 +37,10 @@ import { mcpManager } from "./mcp/manager.js";
 // ============================================================
 // 命令行参数
 // ============================================================
-
-interface CliArgs {
-  workspace: string | null;
-  listWorkspaces: boolean;
-  model: string | null;
-}
-
-function parseArgs(argv: string[]): CliArgs {
-  const args: CliArgs = { workspace: null, listWorkspaces: false, model: null };
-  for (let i = 0; i < argv.length; i++) {
-    const a = argv[i];
-    if (a === "--list-workspaces") {
-      args.listWorkspaces = true;
-    } else if (a === "-m" || a === "--model") {
-      args.model = argv[++i] ?? null;
-    } else if (a === "-w" || a === "--workspace") {
-      args.workspace = argv[++i] ?? null;
-    } else if (!a.startsWith("-") && !args.workspace) {
-      args.workspace = a;
-    }
-  }
-  return args;
-}
+//
+// 解析逻辑已挪到 ./cli-args.js —— 那里是纯函数，可以脱开进程测试。
+// 这里原来那份「认不出的参数就往下走」的实现会静默忽略 `--hlep` / `-m`（缺值），
+// 于是用户以为指定了模型、其实用的默认模型；现在这类写法一律报错退出。
 
 // ============================================================
 // UI 辅助
@@ -81,29 +66,9 @@ function showConfigInfo(workspaceDir: string): void {
 }
 
 function showHelp(verbose = false): void {
-  print(bold("可用命令:"));
-  print(`  ${cyan("/help")}       显示帮助`);
-  print(`  ${cyan("/new")}        开启新对话窗口`);
-  print(`  ${cyan("/clear")}      清除对话历史`);
-  print(`  ${cyan("/cd <路径>")}  切换工作空间`);
-  print(`  ${cyan("/workspace")}  显示当前工作空间`);
-  print(`  ${cyan("/verbose")}    切换思考展开/折叠`);
-  print(`  ${cyan("/todo")}       查看当前任务计划`);
-  print(`  ${cyan("/skills")}     列出已发现的技能 (SKILL.md)`);
-  print(`  ${cyan("/mcp")}        查看 MCP server 配置与连接状态`);
-  print(`  ${cyan("/agents")}     子代理（TS 版尚未接入，见 python_legacy）`);
-  print(`  ${cyan("/config")}     显示配置`);
-  print(`  ${cyan("/config set K V")}  修改配置`);
-  print(`  ${cyan("/model")}      查看/切换模型 (如 /model deepseek)`);
-  print(`  ${cyan("/save")}       保存当前对话`);
-  print(`  ${cyan("/load [序号]")} 恢复历史对话`);
-  print(`  ${cyan("/history")}    列出历史会话`);
-  print(`  ${cyan("/exit")}       退出`);
-  if (verbose) {
-    print();
-    print(dim("提示: 大文件会自动分块，Agent 会用 chunk=N 分块读取"));
-    print(dim("Ctrl+C 可在 Agent 执行过程中打断"));
-  }
+  // 命令清单是 ./help.js 里的单一来源，这里只负责打印 ——
+  // 以前那串手写 print() 与 handleCommand 的 switch 是两份清单，必然漂移。
+  for (const line of renderHelp(verbose)) print(line);
 }
 
 function showWorkspaceInfo(workspaceDir: string): void {
@@ -346,6 +311,7 @@ async function handleCommand(
     }
     default:
       print(red(`未知命令: ${userInput}`));
+      print(dim("输入 /help 查看可用命令"));
   }
   return cs;
 }
@@ -386,12 +352,9 @@ function loadSessionByIndex(indexStr: string, state: AgentState, cs: CommandStat
   return s.id;
 }
 
-function red(s: string): string {
-  return `\x1b[31m${s}\x1b[0m`;
-}
-function blue(s: string): string {
-  return `\x1b[34m${s}\x1b[0m`;
-}
+// 这里原来各自复制了一份 red / blue（`\x1b[31m` 拼字符串），而 ui.ts 已经导出了
+// 同名函数 —— 同一事实两处实现。ANSI 处理一旦在 ui.ts 里统一改动（比如加
+// NO_COLOR 支持），这两份副本不会跟着变。现在统一从 ./ui.js 取。
 
 // ============================================================
 // 主入口
@@ -403,8 +366,44 @@ function formatPrompt(workspaceDir: string, windowNo: number, verbose: boolean):
   return `${cyan(`vca:${base}`)}${dim(` #${windowNo}${mode}`)}> `;
 }
 
+/** 版本号从 package.json 现场读 —— 不在源码里再抄一份（抄一份必然漂移） */
+function readVersion(): string {
+  try {
+    const pkg = path.join(path.dirname(fileURLToPath(import.meta.url)), "..", "package.json");
+    const raw = JSON.parse(fs.readFileSync(pkg, "utf-8")) as { version?: unknown };
+    return typeof raw.version === "string" && raw.version ? raw.version : "unknown";
+  } catch {
+    return "unknown";
+  }
+}
+
 async function main(): Promise<void> {
-  const args = parseArgs(process.argv.slice(2));
+  const parsed = parseArgs(process.argv.slice(2));
+  if (!parsed.ok) {
+    // 用法错误写到 stderr（stdout 可能正被管道消费），退出码 2 与「运行失败 1」区分开
+    process.stderr.write(red(`参数错误: ${parsed.error}`) + "\n\n");
+    process.stderr.write(USAGE + "\n");
+    process.exit(2);
+  }
+  const args = parsed.args;
+
+  // 帮助与版本必须**无条件**看得到，所以要排在配置校验之前：
+  // 首次安装还没填 API Key 的时候，恰恰是最需要 `vca --help` 的时候，
+  // 而原来的顺序会让帮助页被「请填入 API Key」挡在门外（退出码 1）。
+  if (args.help) {
+    showBanner();
+    print(USAGE);
+    print();
+    showHelp(true);
+    print();
+    print(dim(`版本 ${readVersion()} · 配置文件 ${CONFIG_FILE}`));
+    return;
+  }
+  if (args.version) {
+    print(`vca ${readVersion()}`);
+    return;
+  }
+
   installSigintHandler();
 
   // 仅列出历史工作空间

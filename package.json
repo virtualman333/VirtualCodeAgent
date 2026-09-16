@@ -18,6 +18,10 @@
     "start": "node dist/main.js",
     "serve": "tsc && node dist/server.js",
     "typecheck": "tsc --noEmit",
+    "typecheck:test": "tsc --noEmit -p tsconfig.test.json",
+    "test": "node --import tsx --test tests/*.test.ts",
+    "test:cli": "node --import tsx --test tests/cli-spawn.test.ts",
+    "check": "npm run typecheck:test && npm test",
 
     "electron:dev": "node scripts/build-electron.mjs --watch",
     "electron:build": "node scripts/build-electron.mjs",

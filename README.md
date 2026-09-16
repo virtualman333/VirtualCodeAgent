@@ -42,9 +42,13 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 │   ├── mcp/             # MCP 管理器：读配置、连 server、收集动态工具
 │   ├── skills/          # Skills 管理器：发现 / 解析 / 加载 SKILL.md
 │   ├── config.ts        # 配置加载（~/.vca/config.json）
+│   ├── cli-args.ts      # CLI 参数解析（纯函数，参数契约的唯一来源）
+│   ├── help.ts          # 斜杠命令清单（单一来源，/help 由它渲染）
+│   ├── ui.ts            # ANSI 颜色 / 面板 / 显示宽度
 │   ├── main.ts          # 控制台 CLI 入口
 │   ├── server.ts        # HTTP + WebSocket 服务（供 Web 使用）
 │   └── workspace*.ts    # 工作空间选择与管理
+├── tests/               # 测试：cli-args / help（纯函数） + cli-spawn（真的起子进程）
 ├── vscode/              # VS Code 扩展（聊天面板、AskUser 弹窗、工具调用流式展示）
 ├── web/                 # 独立 Web 聊天前端（Vue 3 + Vite）
 ├── scripts/             # 扩展构建脚本（build-extension.mjs）
@@ -92,7 +96,23 @@ npm run dev
 npm run dev -- -w <工作空间路径>     # 指定工作空间
 npm run dev -- -m <模型名>           # 指定模型
 npm run dev -- --list-workspaces     # 列出可用工作空间
+npm run dev -- --help                # 查看完整用法
+npm run dev -- --version             # 查看版本号
 ```
+
+位置参数等同 `-w`，所以 `vca /path/to/project` 与 `vca -w /path/to/project` 一样。
+
+参数写错一律报错退出（退出码 `2`，用法写到 stderr），**不会**静默退回默认值：
+
+| 写法 | 结果 |
+|------|------|
+| `vca --hlep` | 报错，并提示「是否想输入 --help？」 |
+| `vca -m` | 报错：`-m` 后面要跟一个值（旧行为是悄悄用默认模型启动） |
+| `vca -w -m gpt` | 报错：读到的是选项 `-m`，不是值 |
+| `vca -w a -w b` | 报错：重复指定 |
+| `vca -w a b` | 报错：既给了 `-w` 又给了位置参数 |
+
+`--help` 与 `--version` 是特权选项：出现在 `--` 之前就立即生效，**不受**其它参数写错的影响，也排在 API Key 校验之前 —— 首次安装还没填 key 时照样能看到帮助。
 
 控制台内置命令（输入 `/help` 查看完整列表）：
 
@@ -111,6 +131,8 @@ npm run dev -- --list-workspaces     # 列出可用工作空间
 | `/model [名称\|序号]` | 查看 / 切换模型 |
 | `/save` `/load [序号]` `/history` | 保存 / 恢复 / 列出会话 |
 | `/exit` | 退出 |
+
+上表是分组摘要；命令清单的唯一来源是 `src/help.ts` 里的 `COMMANDS`，`/help` 的输出由它渲染，`tests/help.test.ts` 会双向比对它与 `main.ts` 里 `handleCommand` 的 `case` 分支 —— 声明了却没实现、或实现了却没声明，都会让测试变红。
 
 ### B. Web 面板
 
@@ -186,9 +208,18 @@ MCP 管理器（`src/mcp/`）会读下面两个文件里的 `servers` 段，项�
 
 ```bash
 npm run typecheck     # 类型检查 (tsc --noEmit)
+npm run typecheck:test  # 连 tests/ 一起类型检查 (tsconfig.test.json)
 npm run build         # 编译 TS → dist/
 npm run start         # 运行编译后的 CLI (node dist/main.js)
+npm test              # 跑全部测试 (node --test + tsx)
+npm run test:cli      # 只跑入口冒烟测试
+npm run check         # typecheck:test + test
 ```
+
+测试分两层：
+
+- `tests/cli-args.test.ts` / `tests/help.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性。
+- `tests/cli-spawn.test.ts` —— 入口冒烟层。**真的把 CLI 当子进程跑起来**，断言 stdout / stderr / 退出码。这一层存在的理由：上一轮那个「入口守卫在 Windows 上永不成立、`npm run dev` 一行输出都没有」的故障，在所有纯函数测试里都是绿的 —— 被测函数一个都没被调用。判据很朴素：**stdout 是空的就说明 `main()` 压根没跑**。
 
 调试 VS Code 扩展：构建前端与扩展后，在 VS Code 中按 **F5** 启动扩展开发宿主。
 

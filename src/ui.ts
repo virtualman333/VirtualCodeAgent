@@ -27,6 +27,38 @@ export function stripAnsi(s: string): string {
   return s.replace(/\x1b\[[0-9;]*m/g, "");
 }
 
+/**
+ * 显示宽度：CJK / 全角字符算 2 列，其余算 1 列，ANSI 序列不计。
+ * 只为了把 help 里的命令列对齐 —— 不是完整的 Unicode 东亚洲宽度表。
+ */
+export function displayWidth(s: string): number {
+  let w = 0;
+  for (const ch of stripAnsi(s)) {
+    const c = ch.codePointAt(0) ?? 0;
+    const wide =
+      (c >= 0x1100 && c <= 0x115f) ||
+      (c >= 0x2e80 && c <= 0x303e) ||
+      (c >= 0x3041 && c <= 0x33ff) ||
+      (c >= 0x3400 && c <= 0x4dbf) ||
+      (c >= 0x4e00 && c <= 0x9fff) ||
+      (c >= 0xa000 && c <= 0xa4cf) ||
+      (c >= 0xac00 && c <= 0xd7a3) ||
+      (c >= 0xf900 && c <= 0xfaff) ||
+      (c >= 0xfe30 && c <= 0xfe6f) ||
+      (c >= 0xff00 && c <= 0xff60) ||
+      (c >= 0xffe0 && c <= 0xffe6) ||
+      (c >= 0x20000 && c <= 0x3fffd);
+    w += wide ? 2 : 1;
+  }
+  return w;
+}
+
+/** 按显示宽度右侧补空格（padEnd 按码元算，中文列会歪） */
+export function padRight(s: string, width: number): string {
+  const gap = width - displayWidth(s);
+  return gap > 0 ? s + " ".repeat(gap) : s;
+}
+
 // ============================================================
 // 面板
 // ============================================================
