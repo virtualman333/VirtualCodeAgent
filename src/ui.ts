@@ -59,6 +59,32 @@ export function padRight(s: string, width: number): string {
   return gap > 0 ? s + " ".repeat(gap) : s;
 }
 
+/**
+ * 按**显示宽度**截断，超出部分换成 `…`。
+ *
+ * 不能写成 `s.length > max ? s.slice(0, max) + "…"`（本仓库踩过）：
+ * 长度按码元算、宽度按列算，一个汉字占 2 列却是 1 个码元，
+ * 于是中文行会「判定没超、实际超了一倍宽」，把终端里的对齐整个顶歪。
+ * 这里两边都用 displayWidth，逐字符累加。
+ */
+export function clipToWidth(s: string, max: number): string {
+  const text = String(s ?? "").replace(/\s+/g, " ").trim();
+  // 上限小于 2 列时截断没有可表达的意义（1 列连省略号加一个字符都放不下），
+  // 退回兜底值而不是吐出一个光秃秃的「…」—— 那等于把内容整条吃掉。
+  const raw = Number.isFinite(max) ? Math.trunc(max) : 80;
+  const limit = raw >= 2 ? raw : 80;
+  if (displayWidth(text) <= limit) return text;
+  let width = 0;
+  let out = "";
+  for (const ch of text) {
+    width += displayWidth(ch);
+    // 留一列给省略号本身，否则截断后反而比 max 还宽
+    if (width > limit - 1) break;
+    out += ch;
+  }
+  return out + "…";
+}
+
 // ============================================================
 // 面板
 // ============================================================

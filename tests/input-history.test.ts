@@ -12,15 +12,20 @@ import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import {
   HISTORY_MAX,
+  SHOW_DEFAULT,
+  clearHistory,
   formatHistory,
   normalizeEntry,
   parseHistory,
+  parseInputArg,
   pushHistory,
   readHistory,
+  selectHistory,
   writeHistory,
 } from "../src/input-history.js";
 
@@ -203,4 +208,233 @@ test("pushHistory: 归一化后与上一条相同也算重复（多个空格不�
   pushHistory(h, "ls -la");
   assert.equal(pushHistory(h, "  ls -la  "), false);
   assert.deepEqual(h, ["ls -la"]);
+});
+
+// ============================================================
+// parseInputArg —— /input 那个参数到底什么意思
+// ============================================================
+//
+// 参数语义最容易在命令实现里再判一遍，然后两处慢慢分家（`/input 0` 一处当条数、
+// 一处当关键字）。锁定这些边界的价值就在这里：它是唯一一处判定。
+
+test("parseInputArg: 空参数 → 列默认条数、不过滤", () => {
+  assert.deepEqual(parseInputArg(""), { kind: "list", limit: SHOW_DEFAULT, filter: "" });
+  assert.deepEqual(parseInputArg("   "), { kind: "list", limit: SHOW_DEFAULT, filter: "" });
+  assert.deepEqual(parseInputArg(null), { kind: "list", limit: SHOW_DEFAULT, filter: "" });
+  assert.deepEqual(parseInputArg(undefined), { kind: "list", limit: SHOW_DEFAULT, filter: "" });
+});
+
+test("parseInputArg: 正整数是条数（两边空白不计）", () => {
+  assert.deepEqual(parseInputArg("20"), { kind: "list", limit: 20, filter: "" });
+  assert.deepEqual(parseInputArg("  35  "), { kind: "list", limit: 35, filter: "" });
+});
+
+test("parseInputArg: 条数被夹到 1..HISTORY_MAX（不是静默放行）", () => {
+  // 「/input 0」的意图显然是条数，不是想找含 0 的历史
+  assert.equal((parseInputArg("0") as { limit: number }).limit, 1);
+  assert.equal((parseInputArg("9999") as { limit: number }).limit, HISTORY_MAX);
+});
+
+test("parseInputArg: clear 是清空（大小写、空白都不计较）", () => {
+  assert.deepEqual(parseInputArg("clear"), { kind: "clear" });
+  assert.deepEqual(parseInputArg("CLEAR"), { kind: "clear" });
+  assert.deepEqual(parseInputArg("  Clear  "), { kind: "clear" });
+});
+
+test("parseInputArg: clear 后面的东西就不再是 clear 了", () => {
+  assert.equal((parseInputArg("clearx") as { filter: string }).filter, "clearx");
+  assert.equal((parseInputArg("clear now") as { filter: string }).filter, "clear now");
+});
+
+test("parseInputArg: 其余一律当关键字（含负数、小数、空格、中文）", () => {
+  for (const k of ["redis", "redis 超时", "-3", "1e3", "20 30", "缓存"]) {
+    const a = parseInputArg(k) as { kind: string; filter: string; limit: number };
+    assert.equal(a.kind, "list", `${k} 应视为列表`);
+    assert.equal(a.filter, k);
+    assert.equal(a.limit, SHOW_DEFAULT, `${k} 当关键字时用默认条数`);
+  }
+});
+
+// ============================================================
+// selectHistory —— 从历史里挑出要显示的那一段
+// ============================================================
+//
+// 顺序必须是「最新在前」：列表里的 1 要和 ↑ 的第一次翻页对上，
+// 否则用户看着序号 1 去按 ↑ 得到的是别的东西。
+
+const FIVE = ["e5", "e4", "e3", "e2", "e1"];
+
+test("selectHistory: 顺序与 ↑ 一致（最新在前），不重排", () => {
+  const sel = selectHistory(FIVE, { limit: 20 });
+  assert.deepEqual(sel.shown, FIVE);
+  assert.equal(sel.total, 5);
+  assert.equal(sel.matched, 5);
+});
+
+test("selectHistory: 条数只截断不改序，并如实报告总数", () => {
+  const sel = selectHistory(FIVE, { limit: 2 });
+  assert.deepEqual(sel.shown, ["e5", "e4"]);
+  assert.equal(sel.total, 5);
+  assert.equal(sel.matched, 5, "matched 是命中数，不是显示数 —— 两件事");
+});
+
+test("selectHistory: 过滤是子串、不区分大小写", () => {
+  const all = ["Redis 超时", "改样式", "redis 缓存策略", "加一个命令"];
+  assert.deepEqual(selectHistory(all, { limit: 20, filter: "redis" }).shown, [
+    "Redis 超时",
+    "redis 缓存策略",
+  ]);
+  assert.deepEqual(selectHistory(all, { limit: 20, filter: "REDIS" }).shown, [
+    "Redis 超时",
+    "redis 缓存策略",
+  ]);
+  // 子串而不是前缀：记得住的往往是中间那个词
+  assert.deepEqual(selectHistory(all, { limit: 20, filter: "缓存" }).shown, ["redis 缓存策略"]);
+});
+
+test("selectHistory: 过滤后条数不够时如实给出 matched（界面靠它说「还有 N 条」）", () => {
+  const all = ["redis a", "redis b", "redis c", "其它"];
+  const sel = selectHistory(all, { limit: 2, filter: "redis" });
+  assert.deepEqual(sel.shown, ["redis a", "redis b"]);
+  assert.equal(sel.matched, 3);
+  assert.equal(sel.total, 4);
+});
+
+test("selectHistory: 过滤关键字两边空白不计；匹配不到就是空", () => {
+  assert.equal(selectHistory(FIVE, { filter: "  e3  " }).filter, "e3");
+  assert.equal(selectHistory(["abc"], { filter: "  " }).matched, 1, "全空白 = 不过滤");
+  const none = selectHistory(FIVE, { filter: "zzz" });
+  assert.deepEqual(none.shown, []);
+  assert.equal(none.matched, 0);
+  assert.equal(none.total, 5);
+});
+
+test("selectHistory: 空历史与坏输入都不抛（列表为空 ≠ 出错）", () => {
+  for (const bad of [[], null as unknown as string[], undefined as unknown as string[]]) {
+    const sel = selectHistory(bad, { limit: 5 });
+    assert.deepEqual(sel.shown, []);
+    assert.equal(sel.total, 0);
+  }
+});
+
+test("selectHistory: 条数非法时退回默认值，不显示空列表", () => {
+  assert.equal(selectHistory(FIVE, { limit: NaN }).shown.length, 5 > SHOW_DEFAULT ? SHOW_DEFAULT : 5);
+  assert.equal(selectHistory(FIVE, {}).shown.length, 5, "不给条数 → 默认值，够用就全给");
+});
+
+test("selectHistory: 是纯函数 —— 不改动传进来的数组", () => {
+  const arr = [...FIVE];
+  const snapshot = [...arr];
+  selectHistory(arr, { limit: 2, filter: "e" });
+  assert.deepEqual(arr, snapshot);
+});
+
+test("selectHistory: skip 剔掉「当前这一行」（主循环先记历史再执行命令）", () => {
+  const all = ["/input", "上一条", "上上条"];
+  const sel = selectHistory(all, { limit: 10, skip: "/input" });
+  assert.deepEqual(sel.shown, ["上一条", "上上条"]);
+  assert.equal(sel.total, 2, "total 也要跟着剔 —— 头部写着「N / total 条」，两处口径必须一致");
+  assert.equal(sel.matched, 2);
+});
+
+test("selectHistory: skip 只比对第一条，不误伤历史里真实存在的同名输入", () => {
+  const all = ["/input", "/input", "别的"];
+  const sel = selectHistory(all, { limit: 10, skip: "/input" });
+  assert.deepEqual(sel.shown, ["/input", "别的"], "历史里第二条真的是 /input，就该显示出来");
+});
+
+test("selectHistory: skip 对不上就别剔（不能因为传了就无脑切掉第一条）", () => {
+  const all = ["别的", "再别的"];
+  const sel = selectHistory(all, { limit: 10, skip: "/input" });
+  assert.deepEqual(sel.shown, ["别的", "再别的"]);
+  assert.equal(sel.total, 2);
+});
+
+test("selectHistory: 整份历史只有当前这一行 → 剔完就是空（新装机器上的第一次 /input）", () => {
+  const sel = selectHistory(["/input"], { limit: 10, skip: "/input" });
+  assert.deepEqual(sel.shown, []);
+  assert.equal(sel.total, 0, "这才是「还没有输入历史」该走的分支");
+});
+
+// ============================================================
+// clearHistory —— 内存与文件必须一起清
+// ============================================================
+
+test("clearHistory: 就地清空并返回同一个数组（调用方拿它去写文件才不会分家）", () => {
+  const arr = ["a", "b", "c"];
+  const out = clearHistory(arr);
+  assert.equal(out, arr, "必须是同一个引用 —— 否则「清内存」和「清文件」会各拿一份");
+  assert.deepEqual(arr, []);
+});
+
+test("clearHistory: 清空后再落盘，文件里真的什么都不剩（而不是剩个换行）", () => {
+  const file = tmpFile();
+  writeHistory(file, ["a", "b"]);
+  const mem = readHistory(file);
+  assert.equal(mem.length, 2);
+
+  clearHistory(mem);
+  writeHistory(file, mem);
+
+  assert.equal(readHistory(file).length, 0, "重启后不能又冒出来");
+  assert.equal(fs.readFileSync(file, "utf-8"), "", "文件应为空串 —— 一个换行也让 formatHistory 写不出内容");
+});
+
+// ============================================================
+// /input 命令的接线（结构锁）
+// ============================================================
+//
+// 为什么这里读源码而不是跑行为：接线在 main() 里，需要真终端才能跑。子进程层
+// （tests/cli-spawn.test.ts 那一节）能验**结果**，但验不了**接线方式** ——
+// 而下面这几种坏写法都能跑出看起来正常的结果，出问题时却已经在别处了。
+
+const MAIN_SRC = (() => {
+  const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+  return fs
+    .readFileSync(path.join(root, "src", "main.ts"), "utf-8")
+    .replace(/\/\*[\s\S]*?\*\//g, " ") // 剥块注释：注释里常引用旧代码，会把断言骗过去
+    // 剥行注释必须带 m 标志，否则 `^` 只在整串开头匹配，等于没剥 —— 上面的
+    // `// 参数语义只在 input-history.ts 定义一次（parseInputArg）` 正是这种情形
+    .replace(/(^|[^:])\/\/[^\n]*/gm, "$1 "); // `[^:]` 避开 http://
+})();
+
+/** 截出 `/input` 那个 case 的源码正文（到下一条 case 为止） */
+function inputCaseSource(): string {
+  const start = MAIN_SRC.indexOf('case "/input"');
+  assert.ok(start >= 0, "main.ts 里找不到 /input 的 case");
+  const end = MAIN_SRC.indexOf('case "/save"', start);
+  assert.ok(end > start, "找不到 /input 后面的下一条 case，截取范围不可信");
+  return MAIN_SRC.slice(start, end);
+}
+
+test("结构锁：/input 读 cs.inputHistory，不重新读文件（那是第二份真相）", () => {
+  const src = inputCaseSource();
+  assert.match(src, /cs\.inputHistory/, "/input 必须读 ↑ 正在用的那一份");
+  assert.doesNotMatch(
+    src,
+    /readHistory\s*\(/,
+    "命令里不许重新读文件 —— 内存里刚敲的那条还没落盘，读出来是另一份"
+  );
+});
+
+test("结构锁：参数语义与筛选都不自己实现（各自只有一处定义）", () => {
+  const src = inputCaseSource();
+  assert.match(src, /const action = parseInputArg\s*\(/, "参数语义必须复用 parseInputArg");
+  assert.match(src, /selectHistory\s*\(/, "筛选必须复用 selectHistory");
+  assert.match(src, /clearHistory\s*\(/, "清空必须复用 clearHistory（由它保证原地清空）");
+  // 分支只能落在**解析结果**上。自己从原文里认 clear（正则或小写比对）是
+  // 「同一件事写两遍」的开端：parseInputArg 里改一次，命令里那份不会跟着变。
+  assert.match(src, /action\.kind === "clear"/, "清空分支应读 action.kind");
+  assert.doesNotMatch(src, /\/clear\/i/, "不许用正则从原文里认 clear");
+  assert.doesNotMatch(src, /\.trim\(\)\s*\.toLowerCase\(\)/, "不许自己把原文归一化后比对");
+  assert.doesNotMatch(src, /\.filter\s*\(/, "不许在命令里自己过滤历史");
+});
+
+test("结构锁：清空必须先清内存、再落盘（反了写下去的是清空前的数组）", () => {
+  const src = inputCaseSource();
+  assert.match(src, /writeHistory\s*\(\s*INPUT_HISTORY_FILE/, "清空后必须把结果写回文件");
+  assert.ok(
+    src.indexOf("clearHistory(") < src.indexOf("writeHistory("),
+    "顺序必须是先清内存再落盘"
+  );
 });

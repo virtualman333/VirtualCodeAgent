@@ -34,6 +34,106 @@ export function normalizeEntry(line: unknown): string {
 }
 
 /**
+ * `/input` 不给条数时列多少条。
+ * 取 20 是因为它要能在一屏里看完 —— 列 500 条等于什么都没说。
+ */
+export const SHOW_DEFAULT = 20;
+
+/**
+ * `/input` 的参数语义 —— **唯一一处定义**。
+ *
+ * 语法只有三种，但「什么算条数、什么算关键字」这种判断最容易在
+ * 命令实现里再写一遍，然后两处慢慢分家（`/input 0` 一处当条数、
+ * 一处当关键字）。所以判定放在这里，命令实现只管用它。
+ *
+ *   /input              → 列最近 SHOW_DEFAULT 条
+ *   /input <正整数>      → 列最近 N 条（夹到 1..HISTORY_MAX，「/input 0」的意图
+ *                          显然是条数，不是想找含 0 的历史）
+ *   /input clear        → 清空（大小写不敏感、两边空白不计）
+ *   /input <其它>        → 当关键字做子串过滤
+ *
+ * 「clear」永远是清空命令。想找含 clear 的历史，敲 `lear` 也能匹配到
+ * （过滤是子串匹配，不必写全）。
+ */
+export type InputAction =
+  | { kind: "list"; limit: number; filter: string }
+  | { kind: "clear" };
+
+export function parseInputArg(raw: unknown): InputAction {
+  const arg = String(raw ?? "").trim();
+  if (!arg) return { kind: "list", limit: SHOW_DEFAULT, filter: "" };
+  if (arg.toLowerCase() === "clear") return { kind: "clear" };
+  if (/^\d+$/.test(arg)) {
+    const n = parseInt(arg, 10);
+    return { kind: "list", limit: Math.min(Math.max(n, 1), HISTORY_MAX), filter: "" };
+  }
+  return { kind: "list", limit: SHOW_DEFAULT, filter: arg };
+}
+
+export interface HistorySelection {
+  /** 要显示的条目（**最新在前**，与 ↑ 翻的顺序一致） */
+  shown: readonly string[];
+  /** 过滤前的总条数 */
+  total: number;
+  /** 命中过滤的条数 */
+  matched: number;
+  /** 实际生效的关键字（去掉首尾空白后的原文） */
+  filter: string;
+}
+
+/**
+ * 从历史里挑出要显示的那一段。**纯函数**：不改动传入的数组，
+ * 也不碰文件 —— 显示什么和「文件里存了什么」是两件事。
+ *
+ * 过滤用**子串**而不是前缀：想找「那句带 redis 的」时，
+ * 记得住的往往是中间某个词，前缀匹配基本等于没有。
+ *
+ * `skip` 用来剔掉「当前这一行」：主循环是**先记历史、再执行命令**
+ * （shell 就是这么做的），所以 `/input` 自己已经在历史里了。不剔掉的话
+ * 列表第一行永远是刚敲的那条 `/input`，而新装机器上「还没有输入历史」
+ * 这个分支永远走不到 —— 列表里总有一条，就是它自己。
+ * 只比对**第一条**，不误伤历史里真实存在的同名输入。
+ */
+export function selectHistory(
+  entries: readonly string[],
+  opts: { limit?: number; filter?: string; skip?: string } = {}
+): HistorySelection {
+  const all = Array.isArray(entries) ? entries : [];
+  const skip = String(opts.skip ?? "").trim();
+  const pool = skip && all.length > 0 && all[0] === skip ? all.slice(1) : all;
+
+  const filter = String(opts.filter ?? "").trim();
+  const needle = filter.toLowerCase();
+  const matchedList = needle
+    ? pool.filter((e) => String(e).toLowerCase().includes(needle))
+    : pool;
+
+  const rawLimit = Number(opts.limit);
+  const limit = Number.isFinite(rawLimit)
+    ? Math.min(Math.max(Math.trunc(rawLimit), 1), HISTORY_MAX)
+    : SHOW_DEFAULT;
+
+  return {
+    shown: matchedList.slice(0, limit),
+    total: pool.length,
+    matched: matchedList.length,
+    filter,
+  };
+}
+
+/**
+ * 清空历史。**就地清空并返回同一个数组**。
+ *
+ * 为什么要求「同一个数组」：内存那份是 ↑/↓ 正在用的，文件那份是下次启动要读的。
+ * 只清一边都不算清 —— 只清文件，↑ 还翻得出来；只清内存，重启全回来。
+ * 让调用方把这个函数的返回值直接交给 writeHistory，两边就不可能分家。
+ */
+export function clearHistory(entries: string[]): string[] {
+  entries.length = 0;
+  return entries;
+}
+
+/**
  * 文件文本 → 内存数组（最新在前）。
  *
  * 认两种行：

@@ -37,6 +37,11 @@ export const COMMANDS: readonly CommandSpec[] = [
   { name: "/save", usage: "/save", desc: "保存当前对话" },
   { name: "/load", usage: "/load [序号]", desc: "恢复历史对话" },
   { name: "/history", usage: "/history", desc: "列出历史会话" },
+  {
+    name: "/input",
+    usage: ["/input [条数]", "/input <关键字>", "/input clear"],
+    desc: "查看 / 搜索 / 清空输入历史",
+  },
   { name: "/exit", usage: "/exit", desc: "退出" },
 ];
 
@@ -74,6 +79,9 @@ export function renderHelp(verbose = false): string[] {
     lines.push("提示: 大文件会自动分块，Agent 会用 chunk=N 分块读取");
     lines.push("Ctrl+C 可在 Agent 执行过程中打断");
     lines.push("↑/↓ 翻回敲过的内容（跨会话保留），Tab 补全命令、路径、配置键、模型名");
+    // ⚠ 提示区每一行都不能以 `/` 开头：tests/help.test.ts 靠这个约定判断
+    // 「多出来的只是提示，没有混进命令行」——以命令名开头会让那道锁形同虚设。
+    lines.push("输入历史不只是 ↑ 一条条翻：/input 可查看、搜索、清空");
   }
   return lines;
 }

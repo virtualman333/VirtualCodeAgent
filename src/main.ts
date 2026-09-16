@@ -27,10 +27,18 @@ import {
   blue,
   bold,
   magenta,
+  clipToWidth,
 } from "./ui.js";
 import { parseArgs, USAGE } from "./cli-args.js";
 import { renderHelp, commandNames } from "./help.js";
-import { readHistory, pushHistory, writeHistory } from "./input-history.js";
+import {
+  readHistory,
+  pushHistory,
+  writeHistory,
+  parseInputArg,
+  selectHistory,
+  clearHistory,
+} from "./input-history.js";
 import { completeInput } from "./completer.js";
 import { getCurrentPlan, formatPlan } from "./tools/index.js";
 import { getAllSkills, getSkillDirs } from "./skills/manager.js";
@@ -47,6 +55,12 @@ import { mcpManager } from "./mcp/manager.js";
 // ============================================================
 // UI 辅助
 // ============================================================
+
+/**
+ * `/input` 列表里一条最多占多少列。
+ * 不截断的话，一条长任务描述就能把整屏顶掉 —— 列表是给人扫的，不是给人读的。
+ */
+const HISTORY_LINE_MAX = 110;
 
 function showBanner(): void {
   print();
@@ -126,6 +140,12 @@ interface CommandState {
   verbose: boolean;
   windowNo: number;
   modelName: string;
+  /**
+   * ↑/↓ 正在用的那一份输入历史（最新在前）。
+   * 命令要读就读**这一个数组**，不要自己 readHistory(INPUT_HISTORY_FILE) ——
+   * 那会多出第二份真相：内存里刚敲的那条还没落盘，重新读文件就看不到它。
+   */
+  inputHistory: string[];
 }
 
 async function handleCommand(
@@ -280,6 +300,53 @@ async function handleCommand(
         });
         print(dim("用 /load <序号> 恢复某个会话"));
       }
+      break;
+    }
+    case "/input": {
+      // 输入历史（↑ 翻的那些，存在 ~/.vca/input_history）。
+      // 此前只能靠 ↑ 一条条翻：隔了几十条想找「那句带 redis 的」基本找不到，
+      // 而且没有任何办法清掉它。参数语义只在 input-history.ts 定义一次
+      // （parseInputArg），这里不自己判「是不是 clear」—— 两份判定必然分家。
+      const action = parseInputArg(userInput.replace(/^\/input\s*/i, ""));
+      if (action.kind === "clear") {
+        const n = cs.inputHistory.length;
+        // clearHistory 原地清空、writeHistory 写的就是同一个数组 ——
+        // 只清一边都不算清（只清文件 ↑ 还翻得出来，只清内存重启全回来）
+        clearHistory(cs.inputHistory);
+        writeHistory(INPUT_HISTORY_FILE, cs.inputHistory);
+        print(`${green("✓ 输入历史已清空")} ${dim(`(${n} 条，含刚敲的这一条)`)}`);
+        break;
+      }
+
+      const sel = selectHistory(cs.inputHistory, {
+        limit: action.limit,
+        filter: action.filter,
+        // 主循环先记历史再执行命令，所以 `/input` 自己已经在历史里了 ——
+        // 不剔掉的话列表第一行永远是刚敲的这条
+        skip: userInput,
+      });
+      if (sel.total === 0) {
+        print(dim("还没有输入历史。"));
+        print(dim("敲过的内容会自动记下来（最多 500 条，跨会话保留），之后用 ↑ 或 /input 就能翻回来。"));
+        break;
+      }
+      if (sel.matched === 0) {
+        print(dim(`没有匹配「${sel.filter}」的输入历史（共 ${sel.total} 条）`));
+        break;
+      }
+
+      print(
+        sel.filter
+          ? bold(`输入历史 · 匹配「${sel.filter}」 ${sel.matched} / ${sel.total} 条:`)
+          : bold(`输入历史 · 最近 ${sel.shown.length} / ${sel.total} 条（最新在前）:`)
+      );
+      sel.shown.forEach((line, i) => {
+        print(`  ${cyan(String(i + 1).padStart(2))}. ${clipToWidth(line, HISTORY_LINE_MAX)}`);
+      });
+      if (sel.matched > sel.shown.length) {
+        print(dim(`  …还有 ${sel.matched - sel.shown.length} 条没显示（/input <条数> 看更多）`));
+      }
+      print(dim("↑/↓ 翻回，/input <关键字> 搜索，/input clear 清空"));
       break;
     }
     case "/save": {
@@ -445,12 +512,22 @@ async function main(): Promise<void> {
   const restored = restoreSession(state, ws.path, ws.explicit);
 
   // 5. 显示界面
+  //
+  // 输入历史与 Tab 补全（Python 版的 input_history + VCACompleter，
+  // TS 重写时丢了 —— 裸 readline 既翻不出历史也补不了全）。
+  // 历史只在**主事件循环**里记录：runAgent 内部的 ask_user 回答、打断菜单
+  // 都是过程性输入，不该混进「↑ 翻回上次敲的命令」里。
+  //
+  // 在 cs 之前读出来：`/input` 命令读的就是这一份（cs.inputHistory），
+  // 与 ↑/↓ 用的是同一个数组 —— 命令里再 readHistory 一次就是第二份真相。
+  const inputHistory = readHistory(INPUT_HISTORY_FILE);
   const cs: CommandState = {
     sessionId: restored.sessionId,
     workspaceDir: restored.workspaceDir,
     verbose: false,
     windowNo: storage.listSessions().length + 1,
     modelName: agent.modelConfig.name,
+    inputHistory,
   };
 
   showBanner();
@@ -467,12 +544,6 @@ async function main(): Promise<void> {
   print();
 
   // 6. 主事件循环
-  //
-  // 输入历史与 Tab 补全（Python 版的 input_history + VCACompleter，
-  // TS 重写时丢了 —— 裸 readline 既翻不出历史也补不了全）。
-  // 历史只在**这个循环**里记录：runAgent 内部的 ask_user 回答、打断菜单
-  // 都是过程性输入，不该混进「↑ 翻回上次敲的命令」里。
-  const inputHistory = readHistory(INPUT_HISTORY_FILE);
   const completerContext = {
     commands: commandNames(),            // 命令清单的唯一来源是 help.ts
     configKeys: [...EDITABLE_KEYS].sort(), // 配置键的唯一来源是 config.ts
