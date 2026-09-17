@@ -20,14 +20,27 @@
  * `ansi-source.test.ts` 的 `SCAN_ROOTS`、本文件那条总闸的 `DIRS`，三份内容还不一样），
  * 于是「新加的源码目录」永远扫不到。现在统一收敛到本文件的 `sourceSurface()`：
  * **默认全扫 + 排除表**（要排除必须写明理由），新目录默认进扫描面。
+ *
+ * 背景四（本节末尾新增）：`stripComments` 还有**第三样**共享的东西 —— `/` 到底是正则还是
+ * 除号的那张关键字表。它手工维护、无人核对（14 条里只有 `return` 有测试），而且实测它判错
+ * 的那一侧（除号被读成正则）**会吞掉后面那行的注释**，症状正是背景一与背景二那两条。
+ * 现在那张表每条都有活样例、表外的关键字都要写明理由（宇宙从 `typescript` 现算），
+ * 判错方向的两侧都用棘轮表钉住。
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
+import ts from "typescript";
 
-import { REPO_ROOT, sourceSurface, stripComments } from "./source-utils.js";
+import {
+  REGEX_AFTER_PUNCT,
+  REGEX_AFTER_WORD,
+  REPO_ROOT,
+  sourceSurface,
+  stripComments,
+} from "./source-utils.js";
 
 test("stripComments: 注释被丢掉，字符串与模板串原样保留", () => {
   assert.equal(stripComments("a; // 行注释\nb;"), "a; \nb;", "行注释要丢，但换行要留（保住行数）");
@@ -139,10 +152,12 @@ test("★ stripComments: 正则必须在本行内闭合 —— 判错最多影�
     "<span/>\n</b>\n\n</c>\n",
     "跨行的 `/` 被判成了正则，把几行之后的注释吞成了正则内容"
   );
-  // 反向对照：`a < b` 之后真的写正则时要照常认出来（别为了躲闭合标签把正则全禁了）
+  // 反向对照：`a < b` 之后真的写正则时要照常认出来（别为了躲闭合标签把正则全禁了）。
+  // ⚠ 这里必须用**带引号**的正则：写成 `/x/` 时 `<` 在不在标点表里输出都一样（`/x/` 当除号
+  // 读也不会吃掉注释），那条断言从来没在钉 `<` —— 是条假锁。换成 `RX` 之后，`<` 一被删就红。
   assert.equal(
-    stripComments("const ok = a < /x/.source.length;\n// 注释\nnext;\n"),
-    "const ok = a < /x/.source.length;\n\nnext;\n"
+    stripComments('const ok = a < /[\'"]/.source.length;\n// 注释\nnext;\n'),
+    'const ok = a < /[\'"]/.source.length;\n\nnext;\n'
   );
 });
 
@@ -278,4 +293,368 @@ test("sourceSurface: 传进来的正则带 `g` 也不会漏文件（test() 会�
   } finally {
     fs.rmSync(root, { recursive: true, force: true });
   }
+});
+
+// ---------------------------------------------------------------------------
+// `/` 的上下文面：`/` 是正则还是除号，靠 `source-utils.ts` 里那张**手工维护**的关键字表判定。
+// 它的老毛病不是「写错了」，而是**没有任何东西扛着它**：14 条里只有 `return` 有测试，
+// 其余 13 条没人证明被用到，表外新来的关键字也没人提醒。表烂了会出什么事：`/` 被判成除号 →
+// 正则里的引号让扫描器失步 → 那一行之后的注释全都不剥 → 注释里的反面示例又被当成实现
+// （本文件开头那两条背景原地复活）。
+//
+// 所以本节给这张表三样东西：
+//   ① 每条登记项一个**活样例** —— 经 TS 解析器认证语法合法，且把它从表里删掉后该样例必须翻红；
+//   ② 关键字宇宙**现算**（来自 `typescript` 的 `SyntaxKind`），表外的每个词都要写明理由；
+//   ③ 判错方向的两侧都钉住 —— 除号被读成正则的形态用棘轮表列全。
+// ---------------------------------------------------------------------------
+
+/** 每个样例里那个「带引号的正则」：扫描器一旦判错方向就会在引号处失步并吞掉后面的一切 */
+const RX = "/['\"]/";
+
+/**
+ * 关键字 → 一个**语法合法**的片段，且 `RX` 紧跟在它后面。
+ *
+ * 样例只喂词法扫描器、不执行 —— 所以「`delete /re/.lastIndex` 在严格模式下会抛」这类语义
+ * 问题不在本节范围内；这里钉的是**这个词后面能不能出现正则字面量**这条词法事实。
+ */
+const KEYWORD_SAMPLES: Record<string, string> = {
+  return: `function f(){ return ${RX}.test(s); }`,
+  typeof: `const t = typeof ${RX};`,
+  instanceof: `const b = x instanceof ${RX}.constructor;`,
+  in: `if ('a' in ${RX}) {}`,
+  of: `for (const c of ${RX}.source) {}`,
+  new: `const r = new ${RX}.constructor();`,
+  delete: `delete ${RX}.lastIndex;`,
+  void: `const v = void ${RX};`,
+  do: `do ${RX}.test(a); while (b);`,
+  else: `if (a) b; else ${RX}.test(c);`,
+  yield: `function* g(){ yield ${RX}; }`,
+  await: `async function f2(){ await ${RX}; }`,
+  case: `switch (x) { case ${RX}.test(y): break; }`,
+  throw: `throw ${RX};`,
+};
+
+/** 样例后面接的一行注释与一段代码：判错的症状就是「这行注释没被剥掉」 */
+const TAIL = "\n// 尾注释\nconst after = 1;\n";
+
+/** 现算标点宇宙：可打印 ASCII 里的非字母数字字符（不是手抄的清单） */
+function punctUniverse(): string[] {
+  const out: string[] = [];
+  for (let c = 0x21; c <= 0x7e; c++) {
+    const ch = String.fromCharCode(c);
+    if (!/[A-Za-z0-9]/.test(ch)) out.push(ch);
+  }
+  return out;
+}
+
+/**
+ * 标点表外的字符 —— 每个都要写明「为什么它后面不可能是正则位置」。
+ *
+ * 与关键字那边一样，这里钉的是**有没有漏**：`REGEX_AFTER_PUNCT` 是遍历用的表，删掉一个字符
+ * 只会让循环少跑一圈（静默通过），所以宇宙必须从 ASCII 现算，再做减法。
+ */
+const EXCUSED_PUNCT: Record<string, string> = {
+  '"': "字符串定界符：它后面是字符串内容，不是表达式位置",
+  "'": "字符串定界符：它后面是字符串内容，不是表达式位置",
+  "`": "模板串定界符：同上",
+  "#": "私有名（`#x`）与 shebang（`#!`）的开头",
+  $: "标识符字符（`$x`）",
+  _: "标识符字符（`_x`）",
+  "@": "装饰器（`@Injectable()`）的开头，后面跟标识符",
+  "\\": "转义序列的一部分（`\\u0041`），本身不结束也不开始表达式",
+  ".": "成员访问：它后面的词是**属性名**（`obj.of` 里的 `of` 不是关键字，本轮为此单独加了一条判据）",
+  ")": "能结束一个表达式 —— 后面跟 `/` 只能是除号",
+  "]": "能结束一个表达式（下标访问）—— 后面跟 `/` 只能是除号",
+  "/": "`a / /re/` 语法上合法，但把它放进表里会让 `x = re / 2; // 注释` 这类除法被读成正则（闭合斜杠恰好是后面那行注释的第一个 `/`，实测会漏剥）—— 代价大于收益，明确列为边界",
+};
+
+function stripSample(
+  sample: string,
+  opts: { afterWord?: Set<string>; afterPunct?: string } = {}
+): string {
+  return stripComments(sample + TAIL, opts);
+}
+
+/** TS 自己的解析器给样例背书；`null` = 这个 TS 版本不给 `parseDiagnostics`（那就不该假装验过） */
+function parseDiagnostics(src: string): string[] | null {
+  const sf = ts.createSourceFile("sample.ts", src, ts.ScriptTarget.ESNext, true, ts.ScriptKind.TS) as unknown as {
+    parseDiagnostics?: { messageText: unknown }[];
+  };
+  const d = sf.parseDiagnostics;
+  return Array.isArray(d) ? d.map((x) => String(x.messageText)) : null;
+}
+
+test("★ 关键字表与样例会双向对齐（漏登 / 腐烂都报）", () => {
+  const samples = Object.keys(KEYWORD_SAMPLES).sort();
+  const table = [...REGEX_AFTER_WORD].sort();
+  assert.deepEqual(
+    samples,
+    table,
+    "样例表与关键字表对不上：少一条 = 新加的关键字没人管，多一条 = 样例腐烂"
+  );
+  // 「两边都空」会让上面那条恒真
+  assert.ok(table.length >= 14, `关键字表只剩 ${table.length} 条 —— 表塌了，上面那条就成了空话`);
+
+  for (const [kw, sample] of Object.entries(KEYWORD_SAMPLES)) {
+    // 样例必须真的**踩在这个关键字上**：`/` 前面紧邻的那个词就是它。
+    // 否则删掉这条关键字时样例可能被别的词救活 —— 那条登记项就没在钉自己。
+    const m = /([A-Za-z]+)\s+\/\[/.exec(sample);
+    assert.ok(m, `${kw}: 样例里找不到「关键字 + 正则」的形态：${sample}`);
+    assert.equal(m[1], kw, `${kw}: 样例里正则前面那个词是 ${m[1]}，不是 ${kw}`);
+  }
+});
+
+test("★ 关键字样例会经 TS 解析器认证语法合法（不是编出来的片段）", () => {
+  // 反向对照：先证明这个 API 真的会给诊断 —— 否则「样例都合法」可能只是拿不到诊断
+  const control = parseDiagnostics("const = ;");
+  assert.ok(control, "拿不到 parseDiagnostics（typescript 版本变了？）—— 这条锁会静默全绿");
+  assert.ok(control.length >= 1, "对照组 `const = ;` 没报语法错 —— API 没在干活");
+
+  for (const [kw, sample] of Object.entries(KEYWORD_SAMPLES)) {
+    const diags = parseDiagnostics(sample);
+    assert.ok(diags, `${kw}: 拿不到诊断`);
+    assert.deepEqual(diags, [], `${kw} 的样例不是合法 TS：${sample}`);
+  }
+});
+
+test("★ 每条关键字登记项都要能被删红 —— 否则它没在钉任何东西", () => {
+  for (const [kw, sample] of Object.entries(KEYWORD_SAMPLES)) {
+    // 正方向：表里有它 → 正则被认出来 → 注释被剥掉、后面的代码还在
+    const ok = stripSample(sample);
+    assert.deepEqual(residualComments(ok), [], `${kw}: 正则没被认出来，注释漏成了代码`);
+    assert.ok(ok.includes("const after = 1;"), `${kw}: 样例之后的代码被吞了`);
+
+    // 反方向：把这一条从表里删掉再跑一遍，必须出事。这就是把「按原本的方式改坏它，
+    // 这条断言会不会红」写进常规自测 —— 永远为真的常量断言在这里过不去。
+    const missing = new Set([...REGEX_AFTER_WORD].filter((w) => w !== kw));
+    const bad = stripSample(sample, { afterWord: missing });
+    assert.ok(
+      residualComments(bad).length > 0,
+      `${kw}: 从表里删掉它之后样例照样全绿 —— 这条登记项是摆设`
+    );
+  }
+});
+
+test("★ 标点表：表里的每个字符都要能被删红，表外的每个字符都要有理由", () => {
+  // 注意这里**不能**只循环 `REGEX_AFTER_PUNCT` —— 循环遍历登记表，「表里少了一条」永远
+  // 测不出来（删掉一个字符，循环只是少跑一圈，静默通过）。所以宇宙要**现算**：
+  // 可打印 ASCII 里的非字母数字字符，表外的每一个都得在例外表里写明理由。
+  const universe = punctUniverse();
+  assert.ok(universe.length >= 30, `标点宇宙只剩 ${universe.length} 个 —— 生成方式变了？`);
+  const table = REGEX_AFTER_PUNCT.split("");
+
+  assert.deepEqual(table.filter((c) => !universe.includes(c)), [], "标点表里有打印不出来的字符");
+  assert.deepEqual(
+    universe.filter((c) => !table.includes(c) && !(c in EXCUSED_PUNCT)),
+    [],
+    "这些标点既不在表里、也没有登记理由 —— 表里少一条会在这里现形"
+  );
+  assert.deepEqual(
+    Object.keys(EXCUSED_PUNCT).filter((c) => !universe.includes(c)),
+    [],
+    "例外表里有宇宙外的字符（腐烂）"
+  );
+  assert.deepEqual(
+    Object.keys(EXCUSED_PUNCT).filter((c) => table.includes(c)),
+    [],
+    "同一个字符既在表里又在例外表里"
+  );
+  for (const [ch, reason] of Object.entries(EXCUSED_PUNCT)) {
+    assert.ok(reason.length >= 6, `${JSON.stringify(ch)} 的理由太短，等于没写`);
+  }
+  assert.ok(Object.keys(EXCUSED_PUNCT).length >= 8, "例外表太小 —— 上面那条对账可能只是空跑");
+
+  // 反向对照：把 `)` 从例外表里拿掉，那条对账必须点它的名
+  const probe = Object.keys(EXCUSED_PUNCT).filter((c) => c !== ")");
+  assert.deepEqual(
+    universe.filter((c) => !table.includes(c) && !probe.includes(c)),
+    [")"],
+    "这条对账抓不住「表里少一个标点」—— 它挡不住任何人"
+  );
+
+  for (const ch of table) {
+    const sample = `const y = a ${ch}${RX}.test(b);`;
+    const ok = stripSample(sample);
+    assert.deepEqual(
+      residualComments(ok),
+      [],
+      `${JSON.stringify(ch)} 之后的正则没被认出来 —— 注释漏成了代码`
+    );
+
+    const missing = table.filter((c) => c !== ch).join("");
+    const bad = stripSample(sample, { afterPunct: missing });
+    assert.ok(
+      residualComments(bad).length > 0,
+      `${JSON.stringify(ch)} 从标点表里删掉后样例照样全绿 —— 这个字符是摆设`
+    );
+  }
+});
+
+// ---------------------------------------------------------------------------
+// 关键字宇宙：**现算**，不是手抄。
+// 这条对账要回答的问题是：「表里没有的关键字，凭什么可以没有？」
+// 手抄的答案只能靠人记得，现算的答案会在 TypeScript 多一个关键字时自己变红。
+// ---------------------------------------------------------------------------
+
+/** 现算 JS/TS 的关键字宇宙 —— TypeScript 加一个关键字（`satisfies`/`using`/`accessor` 都这么来的）它就会变 */
+function keywordUniverse(): string[] {
+  const names = Object.keys(ts.SyntaxKind).filter((n) => /^[A-Za-z]+Keyword$/.test(n));
+  // `FirstKeyword` / `LastKeyword` 这些是枚举里的**区间哨兵**，不是关键字
+  return [
+    ...new Set(
+      names.filter((n) => !/^(First|Last)/.test(n)).map((n) => n.slice(0, -"Keyword".length).toLowerCase())
+    ),
+  ].sort();
+}
+
+/**
+ * 表外的关键字放哪儿 —— 按**理由**分组，理由只写一次。
+ *
+ * 分组名 → 成员清单（而不是成员 → 分组名）：分组名只出现一处，写错名字不会有第二份抄件
+ * 把这个错误盖住；而「有分组没理由」和「有理由没分组」两个方向都会红。
+ */
+const EXCUSED_GROUPS: Record<string, string[]> = {
+  mustParen: ["if", "while", "for", "switch", "catch", "with"],
+  declHead: [
+    "const", "let", "var", "function", "class", "interface", "type", "enum", "namespace", "module",
+    "declare", "abstract", "implements", "import", "export", "from", "as", "assert", "asserts",
+    "satisfies", "keyof", "infer", "readonly", "is", "unique", "intrinsic", "out", "using",
+  ],
+  control: ["break", "continue", "debugger", "finally", "try"],
+  selfExpr: ["this", "super", "true", "false", "null", "undefined"],
+  typeName: ["any", "bigint", "boolean", "never", "number", "object", "string", "symbol", "unknown"],
+  contextualIdent: ["async", "get", "set", "global", "defer", "require", "constructor", "package"],
+  modifier: ["private", "protected", "public", "static", "override", "accessor"],
+  grammaticalUnused: ["extends", "default"],
+};
+
+const EXCUSED_REASONS: Record<string, string> = {
+  mustParen: "语法上后面必须跟 `(`（条件/循环/异常的头）",
+  declHead: "声明头或类型位置：后面跟名字、类型或字面量名，不是表达式",
+  control: "控制流关键字：后面是 `;`、`{` 或标签",
+  selfExpr: "本身就是 PrimaryExpression —— 它已经能结束一个表达式，后面跟 `/` 只能是除号",
+  typeName: "TS 的类型名：只出现在类型位置，同时本身是合法标识符",
+  contextualIdent: "上下文关键字：在多数位置它就是普通标识符，后面跟 `/` 多半是变量做除法",
+  modifier: "类成员修饰符：后面跟成员名或类型",
+  grammaticalUnused:
+    "语法上后面能跟正则（`class A extends /re/.constructor`、`export default /re/`），但现实中没有" +
+    "代码这么写；放进表里会把 `mod.default / a / b` 这类除法读成正则（`.default` 是本仓库常见的属性名）",
+};
+
+const EXCUSED_KEYWORDS: ReadonlySet<string> = new Set(Object.values(EXCUSED_GROUPS).flat());
+
+test("★ 关键字宇宙现算：表外的每一个关键字都要有理由，且理由表双向自洽", () => {
+  const universe = keywordUniverse();
+
+  // 自证一：宇宙不能塌（塌了「表外的词都有理由」就恒真）
+  assert.ok(universe.length >= 60, `关键字宇宙只剩 ${universe.length} 个 —— SyntaxKind 的命名变了？`);
+  // 自证二：别用 `FirstKeyword..LastKeyword` 的**数值区间**现算 —— 反向映射的那个槽位被
+  // `FirstKeyword` 这个名字占了，`break` 会被**静默丢掉**（实测）。所以按名字取，并钉住这一点。
+  for (const must of ["break", "return", "typeof", "satisfies", "using", "accessor"]) {
+    assert.ok(universe.includes(must), `现算的关键字宇宙里没有 ${must}`);
+  }
+  const sentinels = Object.keys(ts.SyntaxKind).filter((n) => /^(First|Last)[A-Za-z]*Keyword$/.test(n));
+  assert.ok(
+    sentinels.length >= 4 && sentinels.length <= 8,
+    `区间哨兵的条数变了（${sentinels.join(", ")}）—— 上面那行过滤条件要跟着看`
+  );
+
+  const table = new Set(REGEX_AFTER_WORD);
+  // 双向一：表不许塞私货
+  assert.deepEqual(
+    [...table].filter((w) => !universe.includes(w)),
+    [],
+    "关键字表里有不属于 SyntaxKind 关键字的词"
+  );
+  // 双向二：表外的每个关键字都要有理由 —— **这条就是拦住「新关键字没人知道」的那条锁**
+  assert.deepEqual(
+    universe.filter((w) => !table.has(w) && !EXCUSED_KEYWORDS.has(w)),
+    [],
+    "这些关键字既不在表里、也没有登记理由（TypeScript 新增关键字 / 漏登记会在这里现形）"
+  );
+  // 登记表自洽：不许有非关键字、不许和表重叠、不许一个词进两个组
+  assert.deepEqual(
+    [...EXCUSED_KEYWORDS].filter((w) => !universe.includes(w)),
+    [],
+    "例外表里有根本不是关键字的词（腐烂）"
+  );
+  assert.deepEqual([...EXCUSED_KEYWORDS].filter((w) => table.has(w)), [], "同一个词既在表里又在例外表里");
+  const seen = new Map<string, string>();
+  for (const [group, members] of Object.entries(EXCUSED_GROUPS)) {
+    for (const m of members) {
+      const prev = seen.get(m);
+      assert.equal(prev, undefined, `${m} 同时出现在 ${prev} 与 ${group} 两个分组里`);
+      seen.set(m, group);
+    }
+  }
+  // 理由表双向：每个分组都要有理由，每条理由都要有分组
+  assert.deepEqual(
+    Object.keys(EXCUSED_GROUPS).sort(),
+    Object.keys(EXCUSED_REASONS).sort(),
+    "分组与理由对不上：分组名写错，或写了理由没人用（表会腐烂）"
+  );
+  for (const [group, reason] of Object.entries(EXCUSED_REASONS)) {
+    assert.ok(reason.length >= 12, `${group} 的理由太短，等于没写`);
+  }
+  assert.ok(EXCUSED_KEYWORDS.size >= 50, `例外表只剩 ${EXCUSED_KEYWORDS.size} 条 —— 上面那条对账成了空跑`);
+
+  // 反向对照：把 `satisfies`（TS 4.9 才有的关键字）从例外表里拿掉，那条对账必须点它的名 ——
+  // 证明它真能拦住「语言多了一个关键字而没人管」。
+  const probe = new Set([...EXCUSED_KEYWORDS].filter((w) => w !== "satisfies"));
+  assert.deepEqual(
+    universe.filter((w) => !table.has(w) && !probe.has(w)),
+    ["satisfies"],
+    "这条对账抓不住「新关键字没登记」—— 它挡不住任何人"
+  );
+});
+
+// ---------------------------------------------------------------------------
+// 判错方向的另一侧：**除号被读成正则**。
+// `regexAllowed` 的注释里原来断言「判错只会是把正则当除号」，实测**不成立** ——
+// 表里的词当属性名时（`obj.of / 2;`），`regexEnd` 会把后面那行注释的第一个 `/` 当成闭合斜杠，
+// 剩下的半个 `//` 再也认不出是注释，**这一行的注释整段漏成了代码**（也就是本文件开头那两条
+// 背景的症状）。本轮补了一条文法上精确的判据：`.` 后面的词是**属性名**，不是关键字。
+// ---------------------------------------------------------------------------
+
+test("★ 除号方向的已知边界：会漏剥的形态只有这几种（棘轮）", () => {
+  // 判据：剥完与原串一字不差 = 有注释没被剥掉。每一条都带注释，所以「没漏」必须表现为
+  // 「注释真的不见了」，不能只看「字符串变了没有」。
+  const CASES: [string, boolean][] = [
+    ["const x = a / b; // 尾注释\n", false],
+    ["const x = a / b; /* 块注释 */\n", false],
+    // 属性名：`of` 在表里，但它前面是 `.` —— 这条本轮修好，是这次修复的靶子
+    ["const x = obj.of / 2; // 尾注释\n", false],
+    ["const x = obj.of / 2; /* 块注释 */\n", false],
+    ["const x = obj.of / 2 / 3; // 尾注释\n", false],
+    ["const x = obj.models.in / 2; // 尾注释\n", false],
+    // 上下文关键字**当变量名**用：`of` / `await` / `yield` 在脚本里本来就是合法标识符，
+    // 要判这次到底是关键字还是变量需要作用域信息 —— 这不是一份词法扫描器能回答的问题。
+    // 这一条明确留着：触发前提是「有人拿它当变量名、同一行做除法、后面还跟注释」，全仓没有。
+    ["const of = 1; const y = of / 2; // 尾注释\n", true],
+    ["const of = 1; const y = of / 2; /* 块注释 */\n", true],
+    ["const of = 1; const y = of / 2 / 3; // 尾注释\n", false],
+    ["const await = 1; const y = await / 2; // 尾注释\n", true],
+  ];
+
+  for (const [src, expectedLeak] of CASES) {
+    const out = stripComments(src);
+    const leaked = out === src;
+    assert.equal(
+      leaked,
+      expectedLeak,
+      `形态 「${src.trim()}」 的表现变了：${leaked ? "开始漏剥" : "不再漏剥"} —— ` +
+        (leaked
+          ? "扫描器变差了（多了一种会吞代码的形态）"
+          : "修好了那就把上面这张表的期望改成 false（这张表是棘轮，两个方向都该有人来看一眼）")
+    );
+    if (!expectedLeak) {
+      assert.ok(!out.includes("注释"), `「${src.trim()}」的注释没被剥掉：${JSON.stringify(out)}`);
+    }
+  }
+
+  // 反向对照：把表撑到「连变量名都算关键字」，`obj.of / 2; // 尾注释` 仍不许漏 ——
+  // 说明挡住它的是那条 `.` 判据本身，而不是「表里恰好怎么写的」。
+  const fat = new Set([...REGEX_AFTER_WORD, "a", "b", "x", "y", "obj", "models", "const"]);
+  const wide = stripComments("const x = obj.of / 2; // 尾注释\n", { afterWord: fat });
+  assert.ok(!wide.includes("尾注释"), "属性名之后的除号被读成了正则 —— `.` 那条判据没在干活");
 });

@@ -3,6 +3,17 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 
 /**
+ * `stripComments` 的可选注入点 —— 只为让「关键字表缺了一条会出事」这件事**能被常规自测证明**
+ * （见 `tests/source-utils.test.ts` 的「每条登记项都要能被删红」）。生产调用一律不传。
+ */
+export interface StripOpts {
+  /** `/` 之前允许出现哪些**词**（默认 `REGEX_AFTER_WORD`） */
+  afterWord?: ReadonlySet<string>;
+  /** `/` 之前允许出现哪些**标点**（默认 `REGEX_AFTER_PUNCT`） */
+  afterPunct?: string;
+}
+
+/**
  * 读源码做断言的共用工具 —— **只此一份**（此前 `tests/` 下有三份同名拷贝，一起漂移）。
  *
  * 为什么需要剥注释
@@ -46,8 +57,13 @@ import { fileURLToPath } from "node:url";
  * CSS 注释（`/*` 开头的那些）整段变成「正则内容」漏出来（实测 `web/src/components/PlanList.vue`
  * 与 `web/src/components/SettingsPanel.vue`）。有了它，判错最多影响一行，绝不会像失步那样
  * 把文件后半段整段吃掉。
+ *
+ * 边界四：`/` 的上下文判定见 `regexAllowed` —— 那里还留着一张**关键字表**，表本身是有证据的
+ * （`tests/source-utils.test.ts` 里每条关键字一个活样例，删掉哪条都会红）。
  */
-export function stripComments(src: string): string {
+export function stripComments(src: string, opts: StripOpts = {}): string {
+  const afterWord = opts.afterWord ?? REGEX_AFTER_WORD;
+  const afterPunct = opts.afterPunct ?? REGEX_AFTER_PUNCT;
   let out = "";
   let i = 0;
   const n = src.length;
@@ -72,7 +88,7 @@ export function stripComments(src: string): string {
     }
 
     // 正则字面量：整段照抄（内部的反引号/引号不是字符串定界符）
-    if (c === "/" && regexAllowed(out)) {
+    if (c === "/" && regexAllowed(out, afterWord, afterPunct)) {
       const end = regexEnd(src, i);
       if (end !== -1) {
         out += src.slice(i, end);
@@ -113,11 +129,33 @@ export function stripComments(src: string): string {
 /**
  * `/` 只可能出现在这些字符之后才是**正则开头**；跟在标识符、数字、`)`、`]`、`"` 之后的
  * 一律是除号。启发式取自 JS 词法分析器的通行做法（正则与除号在文法上二义，必须靠上下文）。
+ *
+ * 这张表是**由 tests/ 消费的**：`tests/source-utils.test.ts` 逐字符生成样例，证明每个字符
+ * 都真有用（在一个 `/` 前面放这个字符，正则必须被认出来）。
+ *
+ * ⚠ 别指望「全仓语料」来给这张表兜底 —— 全仓统计出来的「标点 + `/`」被字符串里的路径与
+ * `.vue` 的闭合标签 `</span>` 淹没（实测 332 次是 `<`）。所以「有没有漏字符」只能靠
+ * **现算宇宙做减法**：可打印 ASCII 的非字母数字字符，表外的每一个都必须在测试的
+ * `EXCUSED_PUNCT` 里写明理由。别把这段判据写成「循环这张表」—— 循环遍历登记表时，
+ * 「表里少了一条」只会让循环少跑一圈，**静默通过**。
  */
-const REGEX_AFTER_PUNCT = "(,=:[!&|?{};+-*%^~<>";
+export const REGEX_AFTER_PUNCT = "(,=:[!&|?{};+-*%^~<>";
 
-/** 这些关键字之后可以紧跟正则：`return /re/`、`typeof /re/`、`case /re/:` */
-const REGEX_AFTER_WORD = new Set([
+/**
+ * 这些关键字之后可以紧跟正则：`return /re/`、`typeof /re/`、`case /re/:`
+ *
+ * ⚠ 这是一张**手工维护**的表 —— 所以它必须自带证据，否则就是一条谁也验证不了的白名单：
+ *   - 每条关键字在 `tests/source-utils.test.ts` 里都有一个**活样例**（经 TS 解析器认证语法
+ *     合法，且「把这条关键字从表里删掉」该样例必须翻红）；
+ *   - 表**不许有漏**：JS/TS 的关键字宇宙是从 `typescript` 的 `SyntaxKind` **现算**出来的，
+ *     凡是不在表里的关键字，都必须在同一测试文件的 `EXCUSED_KEYWORDS` 里写明理由 ——
+ *     TypeScript 哪天多一个关键字（`satisfies`、`using`、`accessor` 都这么来的），这条对账就会红。
+ *
+ * 判据方向：表**越大**，「除号被读成正则」的面越大（`obj.of / 2` 里 `of` 是属性名）；
+ * 表**越小**，「正则被读成除号」的面越大（正则里的引号会让扫描器失步，吞掉后面的代码）。
+ * 两头都要样例钉着，见 `regexAllowed` 与测试里的「已知边界」。
+ */
+export const REGEX_AFTER_WORD: ReadonlySet<string> = new Set([
   "return",
   "typeof",
   "instanceof",
@@ -140,16 +178,26 @@ const REGEX_AFTER_WORD = new Set([
  * 判错的方向很重要：这里返回 `true` 而实际是除号时，`regexEnd` 多半返回 -1（除号那一行
  * 里没有第二个裸 `/`），于是按普通字符处理；反过来返回 `false` 而实际是正则时，只是
  * 退回旧行为（正则里的引号可能再次引起失步）。两头都不至于吞掉整段代码。
+ *
+ * ⚠ 上面那段话原本是**假的**：`obj.of / 2; // 注释` 里 `of` 是属性名，却被表判成正则位置，
+ * `regexEnd` 于是把后面那行注释的第一个 `/` 当成闭合斜杠吞掉，剩下的半个 `//` 再也认不出
+ * 是注释 —— **这一行的注释整段漏成了代码**（实测三种形态，见测试里的「已知边界」棘轮）。
+ * 所以补了一条**文法上精确**的判据：关键字前面紧邻 `.` 时它是**属性名**，后面跟的 `/`
+ * 只能是除号（成员表达式本身就能结束一个表达式，正则不可能跟在它后面）。
+ * 剩下的边界只有「上下文关键字被当作变量名用」（`const of = 1; of / 2;`）—— 那需要作用域
+ * 信息才能判，明确留给测试里的棘轮表钉住。
  */
-function regexAllowed(out: string): boolean {
+function regexAllowed(out: string, afterWord: ReadonlySet<string>, afterPunct: string): boolean {
   for (let k = out.length - 1; k >= 0; k--) {
     const ch = out[k];
     if (ch === " " || ch === "\t" || ch === "\n" || ch === "\r") continue;
-    if (REGEX_AFTER_PUNCT.includes(ch)) return true;
+    if (afterPunct.includes(ch)) return true;
     if (/[A-Za-z0-9_$]/.test(ch)) {
       let s = k;
       while (s > 0 && /[A-Za-z0-9_$]/.test(out[s - 1])) s--;
-      return REGEX_AFTER_WORD.has(out.slice(s, k + 1));
+      // `obj.of` / `x?.in` 里的那个词是属性名 —— 关键字不可能出现在 `.` 后面
+      if (s > 0 && out[s - 1] === ".") return false;
+      return afterWord.has(out.slice(s, k + 1));
     }
     return false;
   }
