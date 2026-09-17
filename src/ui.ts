@@ -129,10 +129,88 @@ export function clipToWidth(s: string, max: number): string {
     sawAnsi = true;
     last = at + m[0].length;
   }
-  if (takeVisible(text.slice(last))) return out + (sawAnsi ? RESET : "") + "…";
+  if (takeVisible(text.slice(last)))   return out + (sawAnsi ? RESET : "") + "…";
   // 到这里说明可见宽度没超预算 —— 与开头的判断矛盾，只可能是宽度表变了。
   // 不抛：宁可多给一个省略号，也不要让一句话把整个面板打断。
   return out + "…";
+}
+
+/**
+ * 按**显示宽度**折行 —— **一个字符都不丢**。
+ *
+ * 与 `clipToWidth` 的分工是「摞起来」与「不要了」：
+ *   - `clipToWidth`：只能显示这么多，多的换成 `…`。用在 `panel` 那一层 ——
+ *     一行正文装不下时，给个带省略号的整齐框就够了，读不读得全不重要。
+ *   - `wrapToWidth`：空间不够就把这句话摞成几行。用在**表格单元格**上 ——
+ *     每格都是数据，截掉一半就是数据没了，而表格**不会报任何错**。
+ *
+ * 实测的两种「废纸形态」（终端 49 列 × 8 列表格，改折行之前）：
+ *   1. 收窄到下限：`| 参数 | 类型 | 默认值 | … |` → `| 参… | 类… | 默… | … |`
+ *      整张表**一个字都读不到**；
+ *   2. 再窄一点就退回「原样输出」，交到 `panel` 手里按行截断 ——
+ *      右边几列**整段消失**（实测 61/76/70 列的行被切到 45 列）。
+ * 两种都不报错。表格的宽度不该由「能不能截」决定，该由「能不能折」决定。
+ *
+ * **跨行续样式**：一行若断在样式中间，行尾补 `\x1b[0m`、下一行行首把样式重新
+ * 打开 —— 否则断点之后整个面板的剩余部分都会被染成那个颜色（`clipToWidth`
+ * 的注释里记过同一个坑，那边是「不能切开序列」，这里是「不能漏收尾」）。
+ *
+ * @param text 待折行的文本，可以带 ANSI 序列
+ * @param width 每行显示宽度上限；`<= 0` 或 `Infinity` 表示不折行
+ * @returns 折行后的各行；装得下时是 `[text]` —— **原字符串原样返回**，
+ *          不做 trim、不合并空白（表格单元格的空白是列宽的一部分）
+ */
+export function wrapToWidth(text: string, width: number): string[] {
+  const s = String(text ?? "");
+  if (!(width > 0) || !Number.isFinite(width) || displayWidth(s) <= width) return [s];
+  const limit = Math.max(1, Math.trunc(width));
+
+  // 切成原子：SGR 序列整段算一个（占 0 列、不可切开），其余每个字符一个
+  const atoms: { ansi: boolean; text: string; w: number }[] = [];
+  let last = 0;
+  for (const m of s.matchAll(SGR_RE)) {
+    const at = m.index ?? 0;
+    for (const ch of s.slice(last, at)) atoms.push({ ansi: false, text: ch, w: displayWidth(ch) });
+    atoms.push({ ansi: true, text: m[0], w: 0 });
+    last = at + m[0].length;
+  }
+  for (const ch of s.slice(last)) atoms.push({ ansi: false, text: ch, w: displayWidth(ch) });
+
+  const out: string[] = [];
+  let active = ""; // 跨行仍然「开着」的样式；换行时先收尾、下一行再打开
+  let i = 0;
+  while (i < atoms.length) {
+    const start = i;
+    let w = 0;
+    let space = -1; // 本行最后一个空格的下标，优先在这里断
+    while (i < atoms.length) {
+      const a = atoms[i];
+      if (!a.ansi && w + a.w > limit) break;
+      if (!a.ansi) {
+        w += a.w;
+        if (a.text === " ") space = i;
+      }
+      i++;
+    }
+    // 一个字符就超宽（列宽 1 却遇上汉字）：硬放一个，否则死循环。
+    // 表格路径上 widths[i] ≥ MIN_CELL = 3，走不到；`wrapToWidth` 是导出的，
+    // 别人直接调时得有这条兜底。
+    if (i === start) i = start + 1;
+    else if (i < atoms.length && space >= start) i = space + 1;
+
+    let line = active;
+    for (const a of atoms.slice(start, i)) {
+      line += a.text;
+      if (a.ansi) active = a.text === RESET ? "" : active + a.text;
+    }
+    if (active !== "") line += RESET;
+    // 行尾那个空格是折行留下的（断在空格上），不是内容。
+    // 注意收尾的 RESET 可能排在它后面，所以要连 `(\x1b[…m)*` 一起匹配。
+    line = line.replace(/ +(\x1b\[[0-9;]*m)*$/, "$1");
+    // 只由空格/转义序列组成的行没有信息量，平白把表格撑高一格
+    if (stripAnsi(line) !== "" || i >= atoms.length) out.push(line);
+  }
+  return out.length > 0 ? out : [s];
 }
 
 // ============================================================
@@ -334,10 +412,12 @@ function fitWidths(natural: readonly number[], maxWidth: number, cols: number): 
  *
  * @param lines 表格的原始行（含表头与分隔行），**只含这张表**
  * @param maxWidth 结果每行的显示宽度上限；`0`（默认）表示不设上限、按绝对列宽排。
- *                 面板里要传 `panelInnerWidth()`，否则超宽的表会顶穿右边框
- *                 （`panel` 只能按行**截断**，越界的那几列会被整段吃掉）。
- * @returns 渲染后的行；不是合法表格、或宽度实在装不下时返回 `null`，
- *          由调用方原样输出，不做猜测
+ *                 面板里要传 `panelInnerWidth()`，否则超宽的表会顶穿右边框。
+ *                 装不下时先按水位线收窄列宽，再对**超出列宽的单元格折行**（不截断）。
+ * @returns 渲染后的行；**一逻辑行可能对应多条物理行**（折行的续行）。
+ *          不是合法表格时返回 `null`；连「`cols` 列 × `MIN_CELL` + 分隔符」
+ *          都放不进 `maxWidth` 时也返回 `null` —— 那个宽度下画不出有 `cols` 列的
+ *          东西，由调用方兜底（`renderMarkdown` 会折行输出，不再吐超宽原文）
  */
 export function renderMarkdownTable(lines: readonly string[], maxWidth = 0): string[] | null {
   const rows = lines.map((l) => l.trimEnd());
@@ -364,17 +444,31 @@ export function renderMarkdownTable(lines: readonly string[], maxWidth = 0): str
   if (!widths) return null;
   const aligns = parseAligns(sep);
 
-  // 截断必须在**补空格之前**：先 padCell 再 clip 会连补出来的白一起截掉，
-  // 列宽又回到不一致；而且 padCell 补的白本身就是「宽度」，不能算进内容。
-  const fit = (row: readonly string[]): string[] =>
-    row.map((c, i) => (displayWidth(c) > widths[i] ? clipToWidth(c, widths[i]) : c));
-  const draw = (row: readonly string[]): string =>
-    "| " + row.map((c, i) => padCell(c, widths[i], aligns[i])).join(" | ") + " |";
+  // 超过列宽的单元格**折行**，不截断 —— 见 `wrapToWidth` 里记的那两种废纸形态。
+  // 补空格必须在折行**之后**：先 padCell 再折，补出来的白会被当成内容算进宽度，
+  // 列宽当场就不一致了（同一条教训在「先 pad 再截」的时代也踩过）。
+  //
+  // 一逻辑行展开成若干**物理行**：行高取本行最高的那格，矮的补空 ——
+  // 竖线因此仍逐行对齐，输出仍是合法 Markdown 表格。折出来的续行本身也是
+  // 「以 `|` 开头、以 `|` 结尾」的表格行，所以再渲染一遍不会继续长大（幂等）。
+  const draw = (row: readonly string[], emphasize = false): string[] => {
+    const wrapped = row.map((c, i) => wrapToWidth(c, widths[i]));
+    // 行高取本行折得最狠的那格。注意 `cellLines.length` 是**行数**、不是字符宽度 ——
+    // 宽度一律只由 displayWidth 算（`natural` 那行），这条有结构锁盯着。
+    const height = Math.max(1, ...wrapped.map((cellLines) => cellLines.length));
+    return Array.from({ length: height }, (_, k) =>
+      "| " +
+      wrapped
+        .map((c, i) => padCell(emphasize ? bold(c[k] ?? "") : c[k] ?? "", widths[i], aligns[i]))
+        .join(" | ") +
+      " |"
+    );
+  };
 
   return [
-    draw(fit(cells[0]).map((c) => bold(c))),
+    ...draw(cells[0], true),
     "|" + widths.map((w) => "-".repeat(w + 2)).join("|") + "|",
-    ...cells.slice(1).map((row) => draw(fit(row))),
+    ...cells.slice(1).flatMap((row) => draw(row)),
   ];
 }
 
@@ -401,6 +495,7 @@ export function renderInline(line: string): string {
  *
  * `maxWidth` 是表格的显示宽度上限，默认取 `panelInnerWidth()`（两个调用点都是
  * `panel(renderMarkdown(x), title)`，所以默认值直接按面板内容宽算）。
+ * 表格画不出来时的兜底输出也按它折行 —— 整条扔出去必被 `panel` 截掉右半。
  * 传 `Infinity` 表示不设上限 —— 纯文本消费（测试、比对）用得上。
  */
 export function renderMarkdown(text: string, maxWidth: number = panelInnerWidth()): string {
@@ -428,15 +523,19 @@ export function renderMarkdown(text: string, maxWidth: number = panelInnerWidth(
     if (isTableRow(line)) {
       let end = i + 2;
       while (end < lines.length && isTableRow(lines[end].trimEnd())) end++;
-      const table = renderMarkdownTable(
-        lines.slice(i, end).map((l) => l.trimEnd()),
-        maxWidth
-      );
+      const block = lines.slice(i, end).map((l) => l.trimEnd());
+      const table = renderMarkdownTable(block, maxWidth);
       if (table) {
         out.push(...table);
-        i = end - 1;
-        continue;
+      } else {
+        // 这张表**画不出来**（列太多、或终端太窄）：但也不能把原文整条扔出去 ——
+        // 那些行比面板还宽，交到 `panel` 手里会被按行截断，右边几列静默消失
+        // （实测 8 列表格在 45 列下吐出 61/76/70 列的行，全被切头）。
+        // 折行至少一个字都不丢，读起来还能看出这是张表。
+        for (const raw of block) out.push(...wrapToWidth(renderInline(raw), maxWidth));
       }
+      i = end - 1;
+      continue;
     }
     out.push(renderInline(line));
   }

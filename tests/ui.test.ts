@@ -15,7 +15,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { blue, bold, clipToWidth, cyan, dim, displayWidth, padRight, panel, renderInline, renderMarkdown, renderMarkdownTable, stripAnsi, yellow } from "../src/ui.js";
+import { blue, bold, clipToWidth, cyan, dim, displayWidth, padRight, panel, renderInline, renderMarkdown, renderMarkdownTable, stripAnsi, wrapToWidth, yellow } from "../src/ui.js";
 import { stripComments } from "./source-utils.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -545,6 +545,74 @@ test("★ renderMarkdown: 表格里的 \\| 转义回去写成 \\| —— 能原�
 });
 
 // ============================================================
+// 折行 —— 「装不下」不等于「不要了」
+// ============================================================
+//
+// `clipToWidth` 是「显示不下就换成 `…`」，用在 `panel` 那一层没问题（一行正文
+// 读不全无所谓）。但表格单元格是**数据**：终端 49 列 × 8 列表格实测被它压成
+// `| 参… | 类… | 默… |`，整张表一个字都读不到；再窄一点就连表都不画了、
+// 退回原样输出，让 `panel` 按行截断，右边几列整段消失。两种都不报错。
+// `wrapToWidth` 是这层缺失的能力：**折起来，一个字符都不丢**。
+
+test("wrapToWidth: 装得下（或没给上限）就原样返回那一个字符串", () => {
+  assert.deepEqual(wrapToWidth("hello", 10), ["hello"]);
+  assert.deepEqual(wrapToWidth("hello", 5), ["hello"], "刚好等于上限也算没超");
+  assert.deepEqual(wrapToWidth("中文", 4), ["中文"]);
+  assert.deepEqual(wrapToWidth("abc", 0), ["abc"], "0 表示不设上限");
+  assert.deepEqual(wrapToWidth("abc", -1), ["abc"]);
+  assert.deepEqual(wrapToWidth("abc", Infinity), ["abc"]);
+  // 与 clipToWidth 不同：这里**不做** trim / 空白压缩 —— 单元格里的空白是列宽的一部分
+  assert.deepEqual(wrapToWidth("  a  b  ", 9), ["  a  b  "]);
+  assert.equal(wrapToWidth("  a  b  ", 9)[0], "  a  b  ", "首尾空格被吃掉了");
+});
+
+test("wrapToWidth: 按显示宽度折，不是按码元", () => {
+  assert.deepEqual(wrapToWidth("中文字符串", 4), ["中文", "字符", "串"]);
+  assert.deepEqual(wrapToWidth("abcdefgh", 3), ["abc", "def", "gh"]);
+  // 反证：按码元切会得到 4 个汉字 = 8 列，超上限一倍
+  assert.notEqual(wrapToWidth("中文字符串", 4)[0], "中文字符");
+  assert.deepEqual(wrapToWidth("abcdef", 1), ["a", "b", "c", "d", "e", "f"]);
+});
+
+test("wrapToWidth: 优先断在空格上，行尾不留空格", () => {
+  // 按「刚好填满」折会得到 `aaa bb` / `b ccc` —— 断在词中间
+  const out = wrapToWidth("aaa bbb ccc", 6);
+  assert.deepEqual(out, ["aaa", "bbb", "ccc"]);
+  for (const l of out) assert.equal(l.endsWith(" "), false, `行尾留了空格：${JSON.stringify(l)}`);
+  assert.equal(out.join(" "), "aaa bbb ccc", "折行把词吃掉了");
+});
+
+test("wrapToWidth: 断在样式中间时行尾收、行首重开（否则半个面板被染色）", () => {
+  const out = wrapToWidth(cyan("abcdefgh"), 3);
+  assert.deepEqual(out.map(stripAnsi), ["abc", "def", "gh"]);
+  for (const l of out) assert.ok(displayWidth(l) <= 3, `折出来的行超宽：${JSON.stringify(l)}`);
+  // 样式是一次包裹整段的（`\x1b[36m……\x1b[0m`），断点落在里面，
+  // 不收尾的话断点之后**整个面板**的剩余部分都会被染成青色
+  for (const l of out.slice(0, -1)) {
+    assert.ok(l.endsWith("\x1b[0m"), `行尾没收样式，颜色会漏到下一行：${JSON.stringify(l)}`);
+  }
+  for (const l of out.slice(1)) {
+    assert.ok(l.startsWith("\x1b[36m"), `续行没有重新打开样式：${JSON.stringify(l)}`);
+  }
+});
+
+test("wrapToWidth: 单个字符就超宽也不死循环，且不吞字符", () => {
+  // 列宽 1 遇上汉字（2 列）：放不下也得放一个，否则循环永远推不动。
+  // 表格路径上 widths[i] ≥ MIN_CELL = 3，走不到；但本函数是导出的。
+  const out = wrapToWidth("中中中", 1);
+  assert.equal(out.length, 3);
+  assert.equal(out.join(""), "中中中");
+});
+
+test("wrapToWidth: 坏输入不抛，也不把内容整条吃掉", () => {
+  for (const bad of [undefined, null, "", 0]) {
+    const out = wrapToWidth(bad as unknown as string, 5);
+    assert.ok(Array.isArray(out), `${String(bad)} 应当返回数组`);
+    assert.equal(out.join(""), String(bad ?? ""));
+  }
+});
+
+// ============================================================
 // 表格宽度 —— 「已对齐」不等于「装得下」
 // ============================================================
 //
@@ -575,7 +643,7 @@ test("★ renderMarkdownTable: 给了 maxWidth 就必须装得下（超宽表格
   assert.deepEqual(barCols(lines[2]), barCols(lines[0]), `收窄后竖线没对齐：\n${widthReport(lines)}`);
 });
 
-test("★ renderMarkdownTable: 收窄是「每列都截一点」，不是把右边的列整列丢掉", () => {
+test("★ renderMarkdownTable: 收窄靠折行 —— 每列都在，且不再有省略号", () => {
   const lines = renderMarkdownTable(WIDE_TABLE_MD.split("\n"), 40)!;
   // 三列 + 4 条边界竖线。旧行为（不设上限）下，越界部分由 panel 按行切掉，
   // 第 3 列的尾部和右边框一起消失 —— 这里是「列还在不在」的直接判据。
@@ -583,10 +651,96 @@ test("★ renderMarkdownTable: 收窄是「每列都截一点」，不是把右�
   for (const l of lines) {
     assert.equal(barCols(l).length, 4, `某一行少了列：${JSON.stringify(stripAnsi(l))}`);
     assert.ok(l.trimEnd().endsWith("|"), `右边框被吃掉了：${JSON.stringify(stripAnsi(l))}`);
+    assert.ok(displayWidth(l) <= 40, `上限 40 却给了 ${displayWidth(l)} 列`);
   }
-  // 内容确实是被截短而不是被原样透传
-  assert.ok(stripAnsi(lines[2]).includes("…"), `超宽单元格应当被截断：${JSON.stringify(stripAnsi(lines[2]))}`);
-  assert.equal(stripAnsi(lines[3]).includes("…"), false, "装得下的短行不该被截");
+  // 折行 = 物理行比逻辑行多。原文 4 行：表头 / 分隔 / 两行数据
+  assert.equal(WIDE_TABLE_MD.split("\n").length, 4);
+  assert.ok(lines.length > 4, `超宽的那格应当折行，实际只有 ${lines.length} 行`);
+  // ★ 折行之前这里是 `…`（截断）—— 那是**丢数据**，而表格不会报错，用户看不出少了什么。
+  // 终端 49 列 × 8 列表格实测：整张表变成 `| 参… | 类… | 默… |`，一个字都读不到。
+  assert.equal(
+    stripAnsi(lines.join("\n")).includes("…"),
+    false,
+    `表格里不该再出现省略号：\n${stripAnsi(lines.join("\n"))}`
+  );
+});
+
+test("★ renderMarkdownTable: 折行一个字都不丢（格子的内容拼回去必须与原文逐字相同）", () => {
+  // 单行数据 —— 折出来的续行归属没有歧义，能把「丢没丢字」验干净
+  const original = "这是一个非常长的说明文字，用来把表格撑得远远超过 40 列宽";
+  const md = ["| 参数 | 说明 |", "|------|------|", `| timeout | ${original} |`].join("\n");
+  const lines = renderMarkdownTable(md.split("\n"), 40)!;
+  assert.notEqual(lines, null);
+
+  // 表头占 1 行、分隔占 1 行，其余都是那条数据的物理行。
+  // 每行取第 2 格（`| ` 之后、` |` 之前的第 2 段），两端补白 trim 掉。
+  const cells = lines
+    .slice(2)
+    .map((l) => stripAnsi(l).trim().replace(/^\|/, "").replace(/\|$/, "").split("|")[1].trim());
+  assert.ok(cells.length > 1, `那一格没折行：${cells.join(" / ")}`);
+  // 空白要归一：折行的断点就落在空格上，那个空格是被**折行**吃掉的，不是被截掉的
+  assert.equal(
+    cells.join("").replace(/\s+/g, ""),
+    original.replace(/\s+/g, ""),
+    "折行之后内容对不上 —— 有字被吃掉了"
+  );
+  // 反证：截断写法给出的是 `这是一个非常…`，拼回去必然对不上原文
+  assert.notEqual(cells.join(""), clipToWidth(original, 10));
+});
+
+test("★ renderMarkdownTable: 折出来的续行也是合法表格行（反复渲染不会越长越高）", () => {
+  // 续行以 `|` 开头、以 `|` 结尾，所以它们本身就是合法的表格行 —— 再渲染一遍
+  // 不会「认不出来」。但**不能**指望两遍逐字节相同：折行会把补白吃掉，
+  // 下一遍算自然列宽时最长的那格变短了，列宽会重算（40 → 39 列）。
+  // 真正要守的是：**行数不增长、宽度不越界**，且迭代几遍就稳定。
+  const render = (ls: readonly string[]) =>
+    stripAnsi(renderMarkdownTable(ls, 40)!.join("\n"))
+      .split("\n")
+      .map((l) => l.trimEnd());
+
+  let cur: string[] = WIDE_TABLE_MD.split("\n").map((l) => l.trimEnd());
+  const first = render(cur);
+  let stable = -1;
+  for (let i = 2; i <= 5; i++) {
+    const next = render(cur);
+    if (next.join("\n") === cur.join("\n")) {
+      stable = i;
+      break;
+    }
+    cur = next;
+  }
+  if (stable < 0) cur = render(cur);
+
+  assert.ok(cur.every((l) => displayWidth(l) <= 40), `收敛后仍越界：\n${widthReport(cur)}`);
+  assert.equal(
+    cur.length,
+    first.length,
+    `反复渲染把表撑高了（${first.length} → ${cur.length} 行）—— 每过一层就长高的表不能用`
+  );
+  assert.ok(cur.length > 4, "前提：这张表确实折过行");
+});
+
+test("★ renderMarkdown: 表格画不出来时的兜底输出也折行（panel 不会再把右半截吃掉）", () => {
+  // 8 列表格在 45 列里画不出来（`6 × 列数 + 1 = 49 > 45`，物理上放不下）。
+  // 旧行为：返回 null → 原样输出 → 交到 panel 手里按行截断，
+  // 实测吐出 61/76/70 列的行被切到 45，**右边几列整段消失**。
+  const eight = [
+    "| 参数 | 类型 | 默认值 | 说明 | 作用域 | 必填 | 版本 | 备注 |",
+    "|------|------|--------|------|--------|------|------|------|",
+    "| timeout | number | 30000 | 请求超时时间，单位毫秒 | 全局 | 否 | 1.0 | 无 |",
+  ].join("\n");
+  assert.equal(renderMarkdownTable(eight.split("\n"), 45), null, "前提：这张表在 45 列里确实画不出来");
+
+  const lines = renderMarkdown(eight, 45).split("\n");
+  assert.ok(lines.length > 3, `兜底输出应当折行，实际 ${lines.length} 行`);
+  for (const l of lines) {
+    assert.ok(displayWidth(l) <= 45, `兜底行超宽 ${displayWidth(l)} 列，会被 panel 截掉：${stripAnsi(l)}`);
+  }
+  // 内容不丢：把所有行的空白去掉，原文的每个字都得在（去掉分隔行的 `-`）
+  const flat = lines.map((l) => stripAnsi(l)).join("").replace(/[\s|:-]/g, "");
+  for (const ch of "参数类型默认值说明作用域必填版本备注请求超时时间单位毫秒全局") {
+    assert.ok(flat.includes(ch), `兜底输出里丢了「${ch}」`);
+  }
 });
 
 test("★ renderMarkdown: 端到端 —— panel(renderMarkdown(超宽表)) 右边框不被顶出去", () => {
@@ -716,8 +870,15 @@ test("★ 结构锁: 表格列宽按显示宽度算，且不再有第二套 Mark
   const table = functionBody(src, "export function renderMarkdownTable(");
 
   assert.ok(table.includes("displayWidth("), "列宽必须按 displayWidth 算（按 length 算中文列会歪）");
+  // 剥掉的是**计数**（行数、列数），留下的是「拿 .length 当宽度」。
+  // `cellLines.length` 归计数那一类：它是折行之后的行数，不是任何一格的字宽。
   assert.equal(
-    /\.length\s*[-+*/)]/.test(table.replace(/rows\.length|header\.length|cols|sep\.length|lines\.length/g, "")),
+    /\.length\s*[-+*/)]/.test(
+      table.replace(
+        /rows\.length|header\.length|cols|sep\.length|lines\.length|cellLines\.length/g,
+        ""
+      )
+    ),
     false,
     "表格里不该拿 .length 当宽度参与运算"
   );
