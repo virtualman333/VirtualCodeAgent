@@ -4,9 +4,9 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Virtual Code Agent · 编码 Agent</title>
-<meta name="description" content="LangGraph.js 驱动，控制台 / Web / VS Code 三种形态同一套内核">
+<meta name="description" content="LangGraph.js 驱动，控制台 / Web / VS Code / 桌面端四种形态同一套内核">
 <meta property="og:title" content="Virtual Code Agent · 编码 Agent">
-<meta property="og:description" content="LangGraph.js 驱动，控制台 / Web / VS Code 三种形态同一套内核">
+<meta property="og:description" content="LangGraph.js 驱动，控制台 / Web / VS Code / 桌面端四种形态同一套内核">
 <meta property="og:type" content="website">
 <meta property="og:url" content="https://virtualman333.github.io/VirtualCodeAgent/">
 <meta name="theme-color" content="#7166F0">
@@ -162,20 +162,20 @@ footer{border-top:1px solid var(--border);padding:34px 0 46px;margin-top:24px}
 
 <main>
   <div class="wrap hero">
-    <span class="eyebrow">●  编码 Agent · v0.3.0</span>
-    <h1>LangGraph.js 驱动，控制台 / Web / VS Code 三种形态同一套内核</h1>
+    <span class="eyebrow">●  编码 Agent · v0.4.0</span>
+    <h1>LangGraph.js 驱动，控制台 / Web / VS Code / 桌面端四种形态同一套内核</h1>
     <p class="lead">通过对话自动完成编程任务：读写文件、搜索、执行命令、任务规划，都在你指定的工作空间内进行。</p>
     <div class="cta"><a class="btn btn-primary" href="https://github.com/virtualman333/VirtualCodeAgent">在 GitHub 上查看 →</a><a class="btn btn-ghost" href="https://github.com/virtualman333/VirtualCodeAgent/releases">Releases</a></div>
-    <div class="stats"><div class="stat"><b>3 种</b><span>运行形态</span></div><div class="stat"><b>175</b><span>单元测试</span></div><div class="stat"><b>2 层</b><span>测试：纯函数 + 子进程</span></div></div>
+    <div class="stats"><div class="stat"><b>4 种</b><span>运行形态</span></div><div class="stat"><b>279</b><span>单元测试</span></div><div class="stat"><b>2 层</b><span>测试：纯函数 + 子进程</span></div></div>
   </div>
 
   <section id="features"><div class="wrap">
     <div class="sec-head"><h2>核心能力</h2><p>从实际使用出发，而不是从功能清单出发</p></div>
-    <div class="grid"><div class="card"><span class="ico">🧩</span><h3>一套内核三种形态</h3><p>同一套 Agent 核心跑在控制台 CLI、独立 Web 面板、VS Code 扩展里，行为一致。</p></div><div class="card"><span class="ico">🛠️</span><h3>内置工具集</h3><p>读文件 / 搜索（glob + grep）/ 编辑 / 写入 / 执行命令 / 提问 / 任务计划。</p></div><div class="card"><span class="ico">⌨️</span><h3>交互式输入</h3><p>↑↓ 翻回敲过的内容，跨会话保留；Tab 补全命令、路径、配置键与模型名；/input 能看、能搜、能清。</p></div><div class="card"><span class="ico">📊</span><h3>Markdown 表格对齐</h3><p>模型回答里的表格按显示宽度补齐列宽（中文一个字占 2 列），输出仍是合法 Markdown，复制粘贴不会散。</p></div><div class="card"><span class="ico">💾</span><h3>会话持久化</h3><p>对话自动保存，随时 /load 恢复历史会话、切换工作空间。</p></div><div class="card"><span class="ico">🔌</span><h3>Skills 与 MCP</h3><p>Skills 专业技能与 MCP 外部工具都已接入，用 /skills、/mcp 看实际发现到了什么。</p></div><div class="card"><span class="ico">📐</span><h3>CLI 参数契约</h3><p>--help / --version 是特权选项（没配 API Key 时也能用），写错的参数直接报错而不是静默忽略。</p></div></div>
+    <div class="grid"><div class="card"><span class="ico">🧩</span><h3>一套内核四种形态</h3><p>同一套 Agent 核心跑在控制台 CLI、独立 Web 面板、VS Code 扩展、桌面端里，行为一致。</p></div><div class="card"><span class="ico">🛠️</span><h3>内置工具集</h3><p>读文件 / 搜索（glob + grep）/ 编辑 / 写入 / 执行命令 / 提问 / 任务计划 / 派子代理。</p></div><div class="card"><span class="ico">🤖</span><h3>子代理（SubAgent）</h3><p>把一件能独立做完的子任务整件派出去，等它跑完拿回一段精简汇报：有自己的工作目录与工具白名单（explorer / editor / tester 三套预设），读过的文件不占主对话额度，拿不到 ask_user、也不能再派子代理。</p></div><div class="card"><span class="ico">⌨️</span><h3>交互式输入</h3><p>↑↓ 翻回敲过的内容，跨会话保留；Tab 补全命令、路径、配置键与模型名；/input 能看、能搜、能清。</p></div><div class="card"><span class="ico">📊</span><h3>Markdown 表格对齐</h3><p>模型回答里的表格按显示宽度补齐列宽（中文一个字占 2 列），输出仍是合法 Markdown，复制粘贴不会散。</p></div><div class="card"><span class="ico">💾</span><h3>会话持久化</h3><p>对话自动保存，随时 /load 恢复历史会话、切换工作空间。</p></div><div class="card"><span class="ico">🔌</span><h3>Skills 与 MCP</h3><p>Skills 专业技能与 MCP 外部工具都已接入，用 /skills、/mcp 看实际发现到了什么。</p></div><div class="card"><span class="ico">📐</span><h3>CLI 参数契约</h3><p>--help / --version 是特权选项（没配 API Key 时也能用），写错的参数直接报错而不是静默忽略。</p></div></div>
   </div></section>
 
   <section id="stack"><div class="wrap">
-    <div class="sec-head"><h2>技术栈</h2><p>最新版本：v0.3.0</p></div>
+    <div class="sec-head"><h2>技术栈</h2><p>最新版本：v0.4.0</p></div>
     <div class="pills"><span class="pill">TypeScript</span><span class="pill">LangGraph.js</span><span class="pill">OpenAI 兼容</span><span class="pill">Vue 3</span><span class="pill">Vite</span><span class="pill">WebSocket</span><span class="pill">VS Code Extension</span><span class="pill">esbuild</span></div>
   </div></section>
 
