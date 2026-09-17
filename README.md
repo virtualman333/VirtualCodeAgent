@@ -200,6 +200,21 @@ npm run dev -- --version             # 查看版本号
 
 > 顺带一个已知限制：`promptUser` 每次读取一行后就关掉 readline，所以**把多行文本一次性粘贴进输入框只有第一行会生效**。这与本轮改动无关（原本如此），记在这里免得下次又当成新 bug 查一遍。
 
+#### 颜色：只有 `ui.ts` 的 `esc()` 能产出转义序列
+
+`src/ui.ts` 开头那十几行 helper（`red` / `green` / `blue` / `cyan` / `dim` / `bold` …）是**唯一**的 SGR 产出处。这条声称原本只是注释里的一句话，于是同一件事在仓库里长到了四份：
+
+| 位置 | 形态 |
+|---|---|
+| `src/ui.ts` | `esc()` —— 唯一那份 |
+| `src/main.ts` | 本地 `red` / `blue`（`\x1b[31m` 拼字符串）→ 已清 |
+| `src/agent/runner.ts` | 本地 `red` / `blue` → 本轮清 |
+| `src/workspace.ts` | 本地 `green` → 本轮清 |
+
+main.ts 里那份走的时候还留了段注释：「ANSI 处理一旦在 ui.ts 里统一改动（比如加 NO_COLOR 支持），这两份副本不会跟着变」—— 话说对了，但**只清了 main.ts 那一处**，另外两处原样留了一整轮。副本的代价不是多几行：加 NO_COLOR、换主题、改成 24 位色这类「在 ui.ts 里统一改」的事一旦发生，副本一律不跟，**而且不报错**。
+
+现在这句话有检查扛着：`tests/ansi-source.test.ts` 扫全仓 `.ts` 源码，**剥掉注释之后**只要在 `ui.ts` 之外出现裸转义序列（`\x1b[31m` 这种拼字符串的形态，以及 `/\x1b\[31m/` 这种正则字面量形态）就红。`tests/` 被刻意排除 —— 那里的裸转义是喂给 `stripAnsi` / `displayWidth` 的**测试数据**，是消费者不是生产者。
+
 #### 面板对齐：宽度一律按**显示宽度**算
 
 `src/ui.ts` 里的 `displayWidth` 是唯一的口径：CJK 与常见绘文字算 2 列，ANSI 序列不计。`padRight`、`clipToWidth`、`wrapToWidth`、命令表的说明列、`panel` 全走它。
@@ -352,7 +367,7 @@ npm run check         # typecheck:test + test
 
 测试分两层：
 
-- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` / `tests/ui.test.ts` / `tests/version.test.ts` / `tests/electron-boot.test.ts` / `tests/source-utils.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则（含与 prompt_toolkit 的**格式往返** —— 把官方 `FileHistory.load_history_strings()` 的读取算法照抄进测试当契约，而不是拿自家实现的假设去测自家实现）、控制台宽度的口径（`panel` 每一行的显示宽度只有一个值、窄终端才截断、`📋` 算 2 列而 `⚡` 算 1 列）、Markdown 表格（中文列也对齐、已经对齐的表格再渲染一遍不再变、带竖线的命令行不会被吃成表格、`\|` 转义后能原样读回来、超宽表格按面板宽度收窄后不被 `panel` 二次截断、超宽单元格折行后一个字都不丢且反复渲染不会越长越高、连「列数 × 3 列」都放不下时兜底输出也折行）、版本号只有一个读取处（含界面与文档 —— 侧栏写死过版本号，一直没人核对）、桌面端地址拼装（没有 host 时用主进程报的端口，拿不到就返回 `null` 而不是拼出 `ws:///ws`）。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据。
+- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` / `tests/ui.test.ts` / `tests/version.test.ts` / `tests/electron-boot.test.ts` / `tests/source-utils.test.ts` / `tests/ansi-source.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则（含与 prompt_toolkit 的**格式往返** —— 把官方 `FileHistory.load_history_strings()` 的读取算法照抄进测试当契约，而不是拿自家实现的假设去测自家实现）、控制台宽度的口径（`panel` 每一行的显示宽度只有一个值、窄终端才截断、`📋` 算 2 列而 `⚡` 算 1 列）、Markdown 表格（中文列也对齐、已经对齐的表格再渲染一遍不再变、带竖线的命令行不会被吃成表格、`\|` 转义后能原样读回来、超宽表格按面板宽度收窄后不被 `panel` 二次截断、超宽单元格折行后一个字都不丢且反复渲染不会越长越高、连「列数 × 3 列」都放不下时兜底输出也折行）、版本号只有一个读取处（含界面与文档 —— 侧栏写死过版本号，一直没人核对）、桌面端地址拼装（没有 host 时用主进程报的端口，拿不到就返回 `null` 而不是拼出 `ws:///ws`）。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据。
 - `tests/cli-spawn.test.ts` —— 入口冒烟层。**真的把 CLI 当子进程跑起来**，断言 stdout / stderr / 退出码。这一层存在的理由：上一轮那个「入口守卫在 Windows 上永不成立、`npm run dev` 一行输出都没有」的故障，在所有纯函数测试里都是绿的 —— 被测函数一个都没被调用。判据很朴素：**stdout 是空的就说明 `main()` 压根没跑**。启动面板的对齐也量在这里：喂假数据量不出「终端列数 + 真实内容」组合出来的宽度。
 
 - 所有「读源码做断言」的结构锁共用一个地基：`tests/source-utils.ts` 的 `stripComments`（此前 `tests/` 下有三份拷贝，一起漂移）。它的契约只有一句 —— **只丢注释，别的一律原样保留**。两条会破坏契约的词法各栽过一次，每次的后果都不是「锁松了一点」而是**锁判错**：字符串里的 `//`（URL 的 `://` 一出现，「`ws://` 只有一处」这类锁就对写坏的代码判绿）；**正则字面量里的引号/反引号**（本仓库那两条匹配行内代码与加粗的正则就把反引号写进了字符类，`src/ui.ts` 与 `vscode/src/panel.ts` 实测中招 —— 扫描器在正则的引号处失步后，**从那一行起注释不再被剥**，注释里的反面示例又被当成实现，连栽过的假红原地复活）。`tests/source-utils.test.ts` 逐形态钉住这些边界，另有一条总闸：**全仓源码剥完后不得残留任何注释行** —— 任何新词法让扫描器失步都会在那里现形，不必事先枚举触发形态。

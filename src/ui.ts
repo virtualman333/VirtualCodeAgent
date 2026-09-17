@@ -25,6 +25,11 @@ export function print(text = ""): void {
 /**
  * SGR 转义序列 —— 本仓库的颜色/样式全部由上面的 `esc()` 产出，形态只有这一种。
  *
+ * 这句话**现在有检查扛着了**（`tests/ansi-source.test.ts` 扫全仓源码，ui.ts 之外
+ * 出现任何裸转义序列就红）。在此之前它只是一句注释：main.ts 里那两份被清掉时，
+ * `agent/runner.ts` 的 red/blue 与 `workspace.ts` 的 green 一直留在原地 ——
+ * 同一件事三处实现，且都是在 ui.ts 统一改 ANSI 处理时**静默**不跟的那种。
+ *
  * 宽度计算、截断、Markdown 渲染都要按它切段：**转义序列占 0 列**，
  * 而且永远不能被切开（切一半就是半个 `\x1b[3`，终端会把它当成正文吞掉后面的字符）。
  */

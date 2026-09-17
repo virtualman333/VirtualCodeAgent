@@ -3,7 +3,7 @@
  */
 import path from "node:path";
 import { Config } from "./config.js";
-import { print, cyan, bold, dim, yellow, promptUser } from "./ui.js";
+import { print, cyan, bold, dim, yellow, green, promptUser } from "./ui.js";
 
 export interface WorkspaceSelection {
   path: string;
@@ -91,6 +91,5 @@ export async function switchWorkspace(arg: string, current: string): Promise<str
   }
 }
 
-function green(s: string): string {
-  return `\x1b[32m${s}\x1b[0m`;
-}
+// 这里原来复制了一份 green（`\x1b[32m` 拼字符串），而 ui.ts 已经导出了同名函数 ——
+// 与 main.ts / agent/runner.ts 里那几份是同一件事（见 tests/ansi-source.test.ts）。

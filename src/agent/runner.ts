@@ -21,6 +21,8 @@ import {
   cyan,
   magenta,
   green,
+  red,
+  blue,
   bold,
 } from "../ui.js";
 import { isInterrupted, setInterrupted, handleInterrupt, readInterruptCommand } from "../interrupt.js";
@@ -110,12 +112,11 @@ function renderPlanTool(msg: ToolMessage): void {
   panel(colored.join("\n"), bold(blue("📋 任务计划")), "blue");
 }
 
-function red(s: string): string {
-  return `\x1b[31m${s}\x1b[0m`;
-}
-function blue(s: string): string {
-  return `\x1b[34m${s}\x1b[0m`;
-}
+// 这里原来各自复制了一份 red / blue（`\x1b[31m` 拼字符串），而 ui.ts 已经导出了同名函数。
+// 与 main.ts 里那两份是同一件事 —— 那次只清了 main.ts，这两个留了下来，直到
+// `tests/ansi-source.test.ts` 把「本仓库的颜色只能由 ui.ts 的 esc() 产出」钉成检查。
+// 副本的代价不是「多两行」：ui.ts 里统一改动 ANSI 处理时（宽度计算、跨行续样式、
+// 将来要加的 NO_COLOR），这三份不会跟着变，而且是**静默**不变。
 
 // ============================================================
 // AskUser 交互
