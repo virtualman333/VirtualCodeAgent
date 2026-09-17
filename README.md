@@ -54,8 +54,9 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 │   ├── main.ts          # 控制台 CLI 入口
 │   ├── server.ts        # HTTP + WebSocket 服务（供 Web 使用）
 │   └── workspace*.ts    # 工作空间选择与管理
-├── tests/               # 测试：cli-args / help / completer / input-history / ui / version（纯函数）
-│                        #       + cli-spawn（真的起子进程，含启动面板对齐）
+├── tests/               # 测试：每个主题一个 *.test.ts，`npm test` 全跑 —— 清单以目录为准，
+│                        #       这里只举例：纯函数的 cli-args / help / completer /
+│                        #       input-history / ui / version，真起子进程的 cli-spawn（含启动面板对齐）
 ├── vscode/              # VS Code 扩展（聊天面板、AskUser 弹窗、工具调用流式展示）
 ├── electron/            # 桌面端外壳（主进程 + preload；由 electron-builder 打包）
 ├── web/                 # 独立 Web 聊天前端（Vue 3 + Vite），同时供桌面端复用
@@ -90,7 +91,7 @@ npm install
 
 ---
 
-## 三种运行形态
+## 四种运行形态
 
 ### A. 控制台 CLI
 
