@@ -14,14 +14,20 @@
  * 不再被剥掉**。实测 `src/ui.ts` 残留 30 条注释、`vscode/src/panel.ts` 残留 2 条。
  * 后果就是本文件开头那条：注释里的反面示例被当成实现 —— 连栽过的假红又回来了
  * （见本文件「失步」那一节，用一行纯注释实测复现）。
+ *
+ * 背景三：`stripComments` 是**所有**读源码的锁的地基，而它上面那些锁还共享第二样东西 ——
+ * **扫哪些文件**。那个口径此前被手抄了三份（`version.test.ts` 的 `SOURCE_DIRS`、
+ * `ansi-source.test.ts` 的 `SCAN_ROOTS`、本文件那条总闸的 `DIRS`，三份内容还不一样），
+ * 于是「新加的源码目录」永远扫不到。现在统一收敛到本文件的 `sourceSurface()`：
+ * **默认全扫 + 排除表**（要排除必须写明理由），新目录默认进扫描面。
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
+import os from "node:os";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
-import { stripComments } from "./source-utils.js";
+import { REPO_ROOT, sourceSurface, stripComments } from "./source-utils.js";
 
 test("stripComments: 注释被丢掉，字符串与模板串原样保留", () => {
   assert.equal(stripComments("a; // 行注释\nb;"), "a; \nb;", "行注释要丢，但换行要留（保住行数）");
@@ -143,33 +149,30 @@ test("★ stripComments: 正则必须在本行内闭合 —— 判错最多影�
 test("★ stripComments: 全仓源码剥完后不得残留注释行 —— 失步会在这里现形", () => {
   // 这是本文件两条背景（URL / 正则）的**总闸**：任何新形态的词法让扫描器失步，
   // 症状都是「某处的注释漏了出来」，这一条都会红 —— 不必事先枚举触发形态。
-  const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-  const DIRS = ["src", "web/src", "electron/src", "vscode/src"];
-  const files: string[] = [];
-  for (const d of DIRS) {
-    const dir = path.join(ROOT, d);
-    if (!fs.existsSync(dir)) continue;
-    for (const e of fs.readdirSync(dir, { recursive: true, withFileTypes: true })) {
-      if (e.isFile() && /\.(ts|vue)$/.test(e.name)) files.push(path.join(e.parentPath, e.name));
-    }
-  }
+  //
+  // 扫描面也现算了：这里原来抄着**第三份**目录清单（`DIRS = ["src", "web/src",
+  // "electron/src", "vscode/src"]`，与前两份还不完全一样），于是「不在清单里的源码」
+  // 永远进不来 —— 连这条最该覆盖全仓的总闸自己都漏。
+  const surface = sourceSurface(/\.(ts|vue)$/);
+  assert.deepEqual(surface.problems, [], `扫描面自身不自洽：\n  ${surface.problems.join("\n  ")}`);
+  const files = surface.files;
+
   // 「有没有可检查的对象」要钉住，否则扫描目录改名后这条锁退化成永远为真
   assert.ok(files.length > 10, `只扫到 ${files.length} 个源文件 —— 目录改了？这条锁必须跟着改`);
 
   // 两个已实测中招的文件必须还在扫描范围内：它们带的是**触发形态**本身，
   // 少了它们这条锁就只剩空跑（触发形态消失 = 再也证明不了扫描器扛得住）。
-  const rel = files.map((f) => path.relative(ROOT, f).replace(/\\/g, "/"));
   for (const must of ["src/ui.ts", "vscode/src/panel.ts"]) {
     assert.ok(
-      rel.includes(must),
+      files.includes(must),
       `扫描范围内少了 ${must}（正则字面量里带引号/反引号的触发文件）—— 改名了就更新这条锁`
     );
   }
 
   const offenders: string[] = [];
-  for (const f of files) {
-    const lines = residualComments(stripComments(fs.readFileSync(f, "utf-8")));
-    for (const l of lines) offenders.push(`${path.relative(ROOT, f).replace(/\\/g, "/")} → ${l.trim().slice(0, 70)}`);
+  for (const rel of files) {
+    const lines = residualComments(stripComments(fs.readFileSync(path.join(REPO_ROOT, rel), "utf-8")));
+    for (const l of lines) offenders.push(`${rel} → ${l.trim().slice(0, 70)}`);
   }
   assert.deepEqual(
     offenders,
@@ -184,4 +187,95 @@ test("★ stripComments: 全仓源码剥完后不得残留注释行 —— 失�
     ["// 漏出来的注释", "* 块注释尾巴"],
     "residualComments 自己认不出残留注释 —— 上面那条锁是假的"
   );
+});
+
+// ---------------------------------------------------------------------------
+// 扫描面本身：`sourceSurface` 是上面那条总闸（以及 version / ansi 两条锁）的地基。
+// 地基要能**自证**：塌了、腐烂了、空了都必须自己喊出来，而不是让上层对着空集合判绿。
+// ---------------------------------------------------------------------------
+
+/** 造一个临时仓库树：key 是相对路径，值是内容（`node_modules` 用来验产物目录） */
+function fixture(tree: Record<string, string>): string {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), "vca-surface-"));
+  for (const [rel, body] of Object.entries(tree)) {
+    const full = path.join(root, rel);
+    fs.mkdirSync(path.dirname(full), { recursive: true });
+    fs.writeFileSync(full, body);
+  }
+  return root;
+}
+
+test("★ sourceSurface: 新加的源码目录自动进扫描面（手抄清单正是在这里漏的）", () => {
+  const root = fixture({
+    "src/a.ts": "export const a = 1;\n",
+    "tools/deep/b.ts": "export const b = 1;\n",
+    "tests/c.ts": "// 测试\n",
+    "node_modules/dep/index.ts": "export const dep = 1;\n",
+    "docs/readme.md": "# 不是源码\n",
+  });
+  try {
+    const s = sourceSurface(/\.ts$/, { root, excluded: { tests: "测试数据" } });
+
+    assert.deepEqual(s.problems, [], "这个树是自洽的，不该有 problems");
+    // 核心：`tools/` 谁都没登记过，它是「现算」出来的 —— 手抄清单时代它会静默消失
+    assert.deepEqual(s.roots, ["src", "tools"], `现算的源码根不对：${s.roots.join(", ")}`);
+    assert.deepEqual(s.files, ["src/a.ts", "tools/deep/b.ts"]);
+
+    // 产物目录不算源码
+    assert.ok(!s.files.some((f) => f.startsWith("node_modules/")), "node_modules 不该进扫描面");
+    // 非源码后缀不算
+    assert.ok(!s.files.some((f) => f.endsWith(".md")), ".md 不该进扫描面");
+    // 排除表生效
+    assert.ok(!s.files.some((f) => f.startsWith("tests/")), "排除表没生效");
+
+    // 反向对照（关键）：**把同一棵树按手抄清单的口径算一遍**（只认 `["src"]`），
+    // 掉出去的就是手抄时代会静默漏掉的那些。跑的是同一份 fixture，所以它证明的是
+    // 「结论来自清单口径」，而不是「扫描器本来就这样」。
+    const handCopied = ["src"];
+    const missed = s.files.filter((f) => !handCopied.some((d) => f.startsWith(`${d}/`)));
+    assert.deepEqual(missed, ["tools/deep/b.ts"], "手抄口径应当漏掉 tools/deep/b.ts —— 它正是本轮的靶子");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("★ sourceSurface: 排除表腐烂 / 扫描面塌陷都要自己喊出来", () => {
+  const root = fixture({ "src/a.ts": "export const a = 1;\n", "lib/b.ts": "export const b = 1;\n" });
+  try {
+    // ① 排除表里写了个「底下没有源码」的目录 —— 假条目，必须报
+    const rotten = sourceSurface(/\.ts$/, { root, excluded: { tests: "其实没有这个目录" } });
+    assert.equal(rotten.problems.length, 1, `应当只报一条：${rotten.problems.join(" | ")}`);
+    assert.match(rotten.problems[0], /tests\//, "腐烂报告要点出具体目录");
+
+    // ② 排除表整个是空的 → 没有假条目，扫描面照常（说明①报的是「腐烂」而不是「排除了东西」）
+    const none = sourceSurface(/\.ts$/, { root, excluded: {} });
+    assert.deepEqual(none.problems, []);
+    assert.deepEqual(none.roots, ["lib", "src"], "没有排除表时两处源码都该在");
+
+    // ③ 扫描面塌到零个文件 → 必须报，否则上层「全仓没有第二份」恒真
+    const noSrc = fixture({ "docs/a.md": "x\n" });
+    try {
+      const empty = sourceSurface(/\.ts$/, { root: noSrc, excluded: {} });
+      assert.equal(empty.problems.length, 1, `应当只报一条：${empty.problems.join(" | ")}`);
+      assert.match(empty.problems[0], /扫描面是空的/);
+    } finally {
+      fs.rmSync(noSrc, { recursive: true, force: true });
+    }
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("sourceSurface: 传进来的正则带 `g` 也不会漏文件（test() 会来回翻转）", () => {
+  // 这是本仓库那类「静默少一半」缺陷的同一个形状：`/\.ts$/g` 的 `test()` 交替返回
+  // true / false，扫描面会丢一半文件，而**没有任何东西会报错**。
+  const root = fixture({ "src/a.ts": "1\n", "src/b.ts": "2\n", "src/c.ts": "3\n" });
+  try {
+    const plain = sourceSurface(/\.ts$/, { root, excluded: {} });
+    const global = sourceSurface(/\.ts$/g, { root, excluded: {} });
+    assert.deepEqual(global.files, plain.files, "带 g 的正则让扫描面丢文件了");
+    assert.equal(plain.files.length, 3, "三条都该被扫到");
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });

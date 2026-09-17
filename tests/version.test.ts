@@ -9,36 +9,23 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { test } from "node:test";
 
 import { readVersion } from "../src/version.js";
-import { stripComments } from "./source-utils.js";
+import { REPO_ROOT, sourceSurface, stripComments } from "./source-utils.js";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const rel = (p: string): string => path.relative(ROOT, p).replace(/\\/g, "/");
+const ROOT = REPO_ROOT;
 
 /**
- * 会进产物的源码目录 —— **界面与主进程也算**。
+ * 会进产物的源码 —— **现算**，不是手抄的目录清单。
  *
- * 这里原来只扫 `src/`，那是一条豁免通道：桌面版侧栏写死过 `v0.2.0`（当时已经是 0.3.0），
- * 它就在 `web/src/components/DesktopApp.vue` 里，谁都扫不到、也就一直没人核对。
- * 现在它取自主进程报的 `app.getVersion()`（见 tests/electron-boot.test.ts）。
+ * 这里原来写的是 `["src", "web/src", "electron/src", "vscode/src"]`，那是一条豁免通道：
+ * 桌面版侧栏写死过 `v0.2.0`（当时已经是 0.3.0），它就在 `web/src/components/DesktopApp.vue` 里，
+ * 谁都扫不到、也就一直没人核对。后来把 `web/src` 补进清单 —— 可 `web/vite.config.ts`
+ * 又落在清单外。**手抄的清单必然漏**，所以交给 `sourceSurface()`：默认全扫 + 排除表，
+ * 新加的源码目录自动进扫描面。
  */
-const SOURCE_DIRS = ["src", "web/src", "electron/src", "vscode/src"];
-
-/** 上面这些目录下的 .ts / .vue */
-function sourceFiles(): string[] {
-  const out: string[] = [];
-  for (const d of SOURCE_DIRS) {
-    const dir = path.join(ROOT, d);
-    if (!fs.existsSync(dir)) continue;
-    for (const e of fs.readdirSync(dir, { recursive: true, withFileTypes: true })) {
-      if (e.isFile() && /\.(ts|vue)$/.test(e.name)) out.push(path.join(e.parentPath, e.name));
-    }
-  }
-  return out.sort();
-}
+const SURFACE = sourceSurface(/\.(ts|vue)$/);
 
 /** 读源码做断言前先剥注释（注释里的反面示例会被当成实现 —— 本仓库踩过） */
 // `stripComments` 已收敛到 ./source-utils.ts（原先本文件里那份会把字符串里的 `//` 当注释吃掉）
@@ -50,20 +37,25 @@ test("readVersion: 读到 package.json 里的真实版本号", () => {
 });
 
 test("★ 结构锁: 版本号只有一个读取处（源码里没有第二份写死的版本）", () => {
-  const files = sourceFiles();
+  // 扫描面自证先行：文件数塌了、或排除表里出现假条目，先说清楚是「扫描面坏了」，
+  // 而不是让下面几条断言对着空集合判绿。
+  assert.deepEqual(SURFACE.problems, [], `扫描面自身不自洽：\n  ${SURFACE.problems.join("\n  ")}`);
+  const files = SURFACE.files;
   assert.ok(files.length > 10, `只扫到 ${files.length} 个源文件 —— 路径变了？`);
+  assert.ok(SURFACE.roots.length >= 4, `现算的源码根只剩 ${SURFACE.roots.length} 个：${SURFACE.roots.join(", ")}`);
+  assert.ok(files.includes("src/version.ts"), "现算的扫描面里应当包含 src/version.ts");
 
   // 1) readVersion 只能定义在 src/version.ts
-  const defs = files.filter((f) => /function\s+readVersion\s*\(/.test(fs.readFileSync(f, "utf-8")));
-  assert.deepEqual(defs.map(rel), ["src/version.ts"], `readVersion 被定义了多份：${defs.map(rel).join(", ")}`);
+  const defs = files.filter((f) => /function\s+readVersion\s*\(/.test(fs.readFileSync(path.join(ROOT, f), "utf-8")));
+  assert.deepEqual(defs, ["src/version.ts"], `readVersion 被定义了多份：${defs.join(", ")}`);
 
   // 2) 任何源码里都不许出现 `version: "1.2.3"` 这种写死
   const hard: string[] = [];
   for (const f of files) {
-    stripComments(fs.readFileSync(f, "utf-8"))
+    stripComments(fs.readFileSync(path.join(ROOT, f), "utf-8"))
       .split("\n")
       .forEach((line, i) => {
-        if (/\bversion\s*:\s*["'`]\d+\.\d+\.\d+/.test(line)) hard.push(`${rel(f)}:${i + 1}`);
+        if (/\bversion\s*:\s*["'`]\d+\.\d+\.\d+/.test(line)) hard.push(`${f}:${i + 1}`);
       });
   }
   assert.deepEqual(hard, [], `源码里出现了写死的版本号（应当走 readVersion）：${hard.join(", ")}`);
@@ -72,10 +64,10 @@ test("★ 结构锁: 版本号只有一个读取处（源码里没有第二份�
   //    （写死 v0.2.0，而当时 package.json 已经是 0.3.0，一直没人核对）
   const shown: string[] = [];
   for (const f of files) {
-    stripComments(fs.readFileSync(f, "utf-8"))
+    stripComments(fs.readFileSync(path.join(ROOT, f), "utf-8"))
       .split("\n")
       .forEach((line, i) => {
-        if (/v\d+\.\d+\.\d+/.test(line)) shown.push(`${rel(f)}:${i + 1}`);
+        if (/v\d+\.\d+\.\d+/.test(line)) shown.push(`${f}:${i + 1}`);
       });
   }
   assert.deepEqual(

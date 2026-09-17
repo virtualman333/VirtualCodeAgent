@@ -32,27 +32,29 @@
  *
  * 为什么排除 `tests/`：这里面的裸转义是**测试数据**（`ui.test.ts` 要拿序列喂
  * `stripAnsi` / `displayWidth` / `wrapToWidth`，`help.test.ts` 要验对齐），
- * 它们是消费者不是生产者。排除它是刻意写下来的，不是漏了。
+ * 它们是消费者不是生产者。排除它是刻意写下来的，不是漏了 ——
+ * 登记在 `./source-utils.ts` 的 `EXCLUDED_SOURCE_DIRS` 里（两条锁共用一份，
+ * 免得「为什么排除 tests」这件事写两遍各自漂移）。
+ *
+ * 扫描面本身也**不再是手抄的目录清单**：原来写的是 `SCAN_ROOTS = ["src",
+ * "electron/src", "vscode/src", "web/src"]`，于是 `web/vite.config.ts` 这种
+ * 「不在清单里的源码」永远扫不到。现在走 `sourceSurface()` 现算。
  */
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import path from "node:path";
 import { test } from "node:test";
-import { fileURLToPath } from "node:url";
 
 import { blue, bold, cyan, green, gray, red, yellow } from "../src/ui.js";
-import { stripComments } from "./source-utils.js";
+import { EXCLUDED_SOURCE_DIRS, REPO_ROOT, sourceSurface, stripComments } from "./source-utils.js";
 
-const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = REPO_ROOT;
 
 /** 唯一允许产出裸转义序列的地方 */
 const SOURCE_OF_TRUTH = "src/ui.ts";
 
-/** 扫源码的根目录（`tests/` 见文件头注释：那里的裸转义是测试数据） */
-const SCAN_ROOTS = ["src", "electron/src", "vscode/src", "web/src"];
-
-/** 不扫的目录：安装产物与构建产物 */
-const SKIP_DIRS = new Set(["node_modules", "dist", "dist-electron", ".git"]);
+/** 现算的扫描面（`.ts`；`.vue` 里不拼转义序列） */
+const SURFACE = sourceSurface(/\.ts$/);
 
 /**
  * 裸转义序列的几种写法。
@@ -67,24 +69,6 @@ const SKIP_DIRS = new Set(["node_modules", "dist", "dist-electron", ".git"]);
  */
 const RAW_SGR = /\\x1[bB]\\?\[|\\u001[bB]\\?\[|\\033\\?\[/g;
 
-/** 收集仓库里所有 `.ts` 源码（相对路径用 `/` 分隔） */
-function collectTs(): string[] {
-  const out: string[] = [];
-  for (const root of SCAN_ROOTS) {
-    const abs = path.join(ROOT, root);
-    if (!fs.existsSync(abs)) continue;
-    (function walk(dir: string) {
-      for (const e of fs.readdirSync(dir, { withFileTypes: true })) {
-        if (SKIP_DIRS.has(e.name)) continue;
-        const full = path.join(dir, e.name);
-        if (e.isDirectory()) walk(full);
-        else if (e.name.endsWith(".ts")) out.push(path.relative(ROOT, full).replace(/\\/g, "/"));
-      }
-    })(abs);
-  }
-  return out.sort();
-}
-
 test("ui.ts 的 color helper 真的产出 SGR（单一来源存在，后面的排除才有意义）", () => {
   assert.equal(red("x"), "\x1b[31mx\x1b[0m");
   assert.equal(green("x"), "\x1b[32mx\x1b[0m");
@@ -97,11 +81,17 @@ test("ui.ts 的 color helper 真的产出 SGR（单一来源存在，后面的�
 });
 
 test("全仓源码里没有第二份裸 SGR —— 颜色只能从 ui.ts 出", () => {
-  const files = collectTs();
+  // 扫描面自证先行（第 3 条自证在下面：ui.ts 里必须还有转义序列）
+  assert.deepEqual(SURFACE.problems, [], `扫描面自身不自洽：\n  ${SURFACE.problems.join("\n  ")}`);
+  const files = SURFACE.files;
 
   // 扫描面自证：文件数塌了就说明根目录改了，这条锁会变成一句空话
   assert.ok(files.length >= 20, `扫到的 .ts 文件太少（${files.length} 个），扫描面塌了`);
   assert.ok(files.includes(SOURCE_OF_TRUTH), `扫描面里应当包含 ${SOURCE_OF_TRUTH}`);
+  assert.ok(
+    files.includes("web/vite.config.ts"),
+    "现算的扫描面连 web/vite.config.ts 都没包进来 —— 手抄清单那个洞又回来了"
+  );
 
   const offenders: string[] = [];
   let truthCount = 0;
@@ -141,6 +131,11 @@ test("测试目录被排除是刻意的：那里的裸转义是测试数据", ()
   // 这条不是在测被测代码，是在钉住上面那条锁的**排除项**：
   // 如果哪天有人把 tests/ 也扫进去，ui.test.ts / help.test.ts 会立刻假红，
   // 而那时最省事的「修法」是把锁删掉。写在测试里，改动者能看见理由。
+  assert.ok(EXCLUDED_SOURCE_DIRS.tests, "tests/ 不在排除表里了 —— 上面那条锁的排除项被改掉了");
+  assert.ok(
+    !SURFACE.files.some((f) => f.startsWith("tests/")),
+    "扫描面里出现了 tests/ 下的文件，排除表没生效"
+  );
   const uiTest = fs.readFileSync(path.join(ROOT, "tests", "ui.test.ts"), "utf-8");
   assert.ok((uiTest.match(RAW_SGR) || []).length > 0,
     "tests/ui.test.ts 里本该有裸转义作为测试数据；没有了的话，把 tests/ 排除的理由要重写");
