@@ -351,3 +351,30 @@ test("★ 启动面板：输出里每一条框线等宽（真实入口，不是�
     `启动面板行宽不一致（${widths.join(" / ")}）：\n${boxed.map((l) => `${displayWidth(l)} | ${stripAnsi(l)}`).join("\n")}`
   );
 });
+
+// ============================================================
+// /agents —— 在真实进程里跑一遍
+// ============================================================
+//
+// 这一条不只是界面验证，它还是**模块图**的端到端验证：
+//
+//   main → tools/index → tools/subagent → agent/subagent_manager → (动态) agent/graph
+//        → tools/index ← …这里是环
+//
+// 静态那半段能成立，全靠「谁都不在模块顶层读对方的绑定」。纯函数测试各自只 import
+// 一小块，环的另一半根本没被加载过 —— 只有在真实进程里把整条路径走完，才能证明它不炸。
+
+test("★ /agents：真实进程里跑得起来，列出预设且不再说「没有 SubAgent」", () => {
+  const home = readyHome();
+  const r = runCommand(home, "/agents");
+  assert.equal(r.status, 0, `stderr=${r.stderr}`);
+
+  const out = plain(r.stdout);
+  assert.match(out, /内置子代理预设/, "没打出预设小节 —— 命令分支没走到？");
+  // 三个预设都该出现，且它们来自 BUILTIN_PRESETS（不是界面里手写的第二份）
+  for (const name of ["explorer", "editor", "tester"]) {
+    assert.ok(out.includes(name), `/agents 没有列出预设 ${name}`);
+  }
+  assert.match(out, /本次会话还没有派过子代理/, "没报出「本会话还没派过」的状态");
+  assert.doesNotMatch(out, /尚未接入|还没有 SubAgent|python_legacy/, "/agents 还在说那句谎话");
+});

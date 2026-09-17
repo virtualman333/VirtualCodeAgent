@@ -44,6 +44,8 @@ import { completeInput } from "./completer.js";
 import { getCurrentPlan, formatPlan } from "./tools/index.js";
 import { getAllSkills, getSkillDirs } from "./skills/manager.js";
 import { mcpManager } from "./mcp/manager.js";
+import { getSubagentManager, setSubagentHost } from "./agent/subagent_manager.js";
+import { formatAgentLine, formatPresetLines } from "./agent/subagents.js";
 
 // ============================================================
 // 命令行参数
@@ -177,6 +179,9 @@ async function handleCommand(
       state.pending_question = null;
       cs.sessionId = null;
       cs.windowNo = storage.listSessions().length + 1;
+      // 子代理运行记录是**按会话**的：新开一个窗口后还列着上个窗口派过的子代理，
+      // 会让「刚才那个子代理」指错对象（id 仍然有效，但汇报属于上一轮的上下文）。
+      getSubagentManager().clear();
       print(`${green("✓ 已开启新对话窗口")} ${dim(`#${cs.windowNo} (输入 /load 可切回历史窗口)`)}`);
       break;
     }
@@ -184,6 +189,7 @@ async function handleCommand(
       state.messages = [];
       state.pending_question = null;
       cs.sessionId = null;
+      getSubagentManager().clear();
       print(green("对话历史已清除"));
       break;
     case "/workspace":
@@ -286,10 +292,33 @@ async function handleCommand(
       }
       break;
     }
-    case "/agents":
-      print(dim("TS 版还没有 SubAgent（Python 版有，见 python_legacy/src/vca/subagents/）。"));
-      print(dim("当前多步任务由主 Agent 自己拆解，用 /todo 看计划。"));
+    case "/agents": {
+      // 这条命令此前只打印「TS 版还没有 SubAgent」—— 与 /skills、/mcp 是同一个病：
+      // 能力已经接进来了，界面还在说没有，用户永远不会去用（也不会去调它的白名单）。
+      // 现在一律从真实注册表与运行记录里读，不手写结论。
+      const mgr = getSubagentManager();
+      print(bold("内置子代理预设") + dim(" (spawn_subagent 的 tools 参数可直接写预设名):"));
+      for (const line of formatPresetLines()) print(line);
+
+      const runs = mgr.listRuns();
+      print();
+      if (runs.length === 0) {
+        print(dim("本次会话还没有派过子代理。主 Agent 遇到能独立做完的调研/改动时会自己派。"));
+      } else {
+        print(bold(`本次会话派过 ${runs.length} 个子代理（按派发顺序）:`));
+        for (const r of runs) print(`  ${formatAgentLine(r)}`);
+        print(dim("用 get_subagent_result <id> 看某个子代理的完整汇报"));
+      }
+
+      print(
+        dim(
+          mgr.hasHost()
+            ? "子代理同步执行（派出去要等它跑完），有独立的工作目录与工具白名单，看不见 ask_user，也不能再派子代理。"
+            : "⚠ 主代理还没登记工具池，现在派子代理会失败（创建 Agent 后应调用 setSubagentHost）。"
+        )
+      );
       break;
+    }
     case "/history": {
       const sessions = storage.listSessions(10);
       if (sessions.length === 0) {
@@ -491,6 +520,7 @@ async function main(): Promise<void> {
   let agent: CodingAgent;
   try {
     agent = await createCodingAgent(args.model);
+    setSubagentHost(agent);
   } catch (e) {
     print(red(`Agent 初始化失败: ${(e as Error).message}`));
     process.exit(1);
@@ -584,6 +614,9 @@ async function main(): Promise<void> {
     // 运行 Agent (每次按当前模型创建, 支持 /model 切换)
     try {
       agent = await createCodingAgent(cs.modelName);
+      // 每轮都重建 Agent，所以每轮都要重新登记：`/model` 换了模型之后，
+      // 子代理必须跟着换（不然它会悄悄用上一个模型，而这在日志里看不出来）。
+      setSubagentHost(agent);
     } catch (e) {
       print(red(`Agent 创建失败: ${(e as Error).message}`));
       continue;

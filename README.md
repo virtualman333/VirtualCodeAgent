@@ -17,6 +17,7 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 - **交互式输入**：`↑`/`↓` 翻回敲过的内容（**跨会话保留**，与 Python 版**共用同一个历史文件、且双向可读**），`Tab` 补全命令、路径、配置键与模型名；`/input` 可搜索、按条数查看、清空这份历史（不用再一条条按 `↑` 找）。
 - **多模型切换**：支持在 `config.json` 中配置多个模型并运行时切换（`/model`）。
 - **可扩展**：Skills 专业技能（`SKILL.md`，用户级 / 项目级目录都能发现）与 MCP 外部工具接口均已接入，Agent 侧通过 `list_skills` / `load_skill` 取用技能，MCP 工具在每轮对话时动态并入工具池。用 `/skills`、`/mcp` 查看实际发现到什么。
+- **子代理（SubAgent）**：主 Agent 能把一件能独立做完的子任务派出去（`spawn_subagent`），等它跑完再拿回一段精简汇报。子代理有**自己的工作目录与工具白名单**（`explorer` / `editor` / `tester` 三套预设，也可以直接点名工具），有自己的上下文，读过的文件不会占用主对话的额度。用 `/agents` 看预设与本次会话的运行记录。
 
 ---
 
@@ -39,8 +40,9 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 ```
 .
 ├── src/                 # TS 版核心 Agent
-│   ├── agent/           # 状态图编排 (graph)、会话、提示词、runner
-│   ├── tools/           # 内置工具：read / search / edit / write / bash / ask_user / plan
+│   ├── agent/           # 状态图编排 (graph)、子代理 (subagents / subagent_manager)、会话、提示词、runner
+│   ├── tools/           # 内置工具：read / search / edit / write / bash / ask_user / plan / subagent
+│   │                    #          + executable（哪些能进 ToolNode，零依赖叶子模块，便于单测）
 │   ├── mcp/             # MCP 管理器：读配置、连 server、收集动态工具
 │   ├── skills/          # Skills 管理器：发现 / 解析 / 加载 SKILL.md
 │   ├── config.ts        # 配置加载（~/.vca/config.json）
@@ -135,7 +137,7 @@ npm run dev -- --version             # 查看版本号
 | `/todo` | 查看当前任务计划 |
 | `/skills` | 列出已发现的技能（含技能目录，方便自己放 `SKILL.md`） |
 | `/mcp` | 查看 MCP server 配置与连接状态 |
-| `/agents` | 子代理（**TS 版尚未接入**，Python 版见 `python_legacy/src/vca/subagents/`） |
+| `/agents` | 子代理：可用预设 + 本次会话派过的子代理与运行状态 |
 | `/config set K V` | 修改配置 |
 | `/model [名称\|序号]` | 查看 / 切换模型 |
 | `/save` `/load [序号]` `/history` | 保存 / 恢复 / 列出会话 |
@@ -199,6 +201,26 @@ npm run dev -- --version             # 查看版本号
 - **清空先清内存、再落盘**，且 `clearHistory` 是**原地清空并返回同一个引用** —— 只清一边都不算清（只清文件 `↑` 还翻得出来，只清内存重启全回来）。
 
 > 顺带一个已知限制：`promptUser` 每次读取一行后就关掉 readline，所以**把多行文本一次性粘贴进输入框只有第一行会生效**。这与本轮改动无关（原本如此），记在这里免得下次又当成新 bug 查一遍。
+
+#### 子代理：把一件子任务派出去做完
+
+主 Agent 遇到「要读一堆文件才能得出结论」的活时，可以整件派给一个子代理，而不是把几十个文件的原文全读进自己的上下文。
+
+| 工具 | 用途 |
+|---|---|
+| `spawn_subagent` | 派出去并**等它跑完**（同步阻塞，不是后台任务）。同一轮里调多次会并发执行 |
+| `list_subagent_runs` | 本次会话派过哪些子代理、状态 / 工具调用次数 / 耗时 |
+| `get_subagent_result` | 按 id 再取某个子代理的完整汇报 |
+
+三条约定，每条都是踩出来的：
+
+- **子代理看不见本次对话**。它只拿到一段任务描述和一份**独立**的 system prompt，所以 `task` 必须自包含（目标、范围、验收标准都写清楚）。它读过的文件、跑过的命令也不进主对话历史，只有一段精简汇报回得来 —— 太长会留头留尾并写明省了多少字符（只留头会看不到结论，而结论几乎总在最后；只留尾则看不到它做了什么）。
+- **安全边界由构造保证，不是靠拦**。子代理永远拿不到 `ask_user`（没有人可以问它，留着它会在「向用户提问」上永久挂起 = 整轮任务卡死）与派发类工具（否则子代理能无限套娃，成本与并发都不受控）。这不是「检查它有没有乱调」，而是**它看不见这些工具**：白名单同时过滤掉「绑给模型的」与「`ToolNode` 能执行的」两份 —— 只过滤前者的话，模型写出来的调用请求照样会被执行，白名单就成了假锁。拿 `explorer` 预设的子代理**没有写文件的能力**。
+- **白名单没生效会说出来**。写了不认识的名字、或写了被禁用的工具，回包里会列出被忽略的名字；一个都没匹配上时回落到默认工具池并明确警告 —— 不然「我明明写了 `write_file`」和「子代理悄悄只能读」在主 Agent 眼里长得一模一样。
+
+子代理的工作目录默认跟着主代理，也可以用 `workspace` 参数指到子目录去；工作目录的隔离靠 `AsyncLocalStorage` 挂在子代理自己的异步链上（`src/workspace_ctx.ts`），跑完还会把模块级变量还原 —— 少了这一步，子代理跑完之后主代理所有相对路径都会解析到子代理的目录里，文件写到别处去且**不报任何错**。
+
+`/agents` 列出的预设清单来自代码里的常量（`src/agent/subagents.ts` 的 `BUILTIN_PRESETS`），这里不抄一份：抄一份必然漂移。
 
 #### 颜色：只有 `ui.ts` 的 `esc()` 能产出转义序列
 
@@ -367,7 +389,7 @@ npm run check         # typecheck:test + test
 
 测试分两层：
 
-- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` / `tests/ui.test.ts` / `tests/version.test.ts` / `tests/electron-boot.test.ts` / `tests/source-utils.test.ts` / `tests/ansi-source.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则（含与 prompt_toolkit 的**格式往返** —— 把官方 `FileHistory.load_history_strings()` 的读取算法照抄进测试当契约，而不是拿自家实现的假设去测自家实现）、控制台宽度的口径（`panel` 每一行的显示宽度只有一个值、窄终端才截断、`📋` 算 2 列而 `⚡` 算 1 列）、Markdown 表格（中文列也对齐、已经对齐的表格再渲染一遍不再变、带竖线的命令行不会被吃成表格、`\|` 转义后能原样读回来、超宽表格按面板宽度收窄后不被 `panel` 二次截断、超宽单元格折行后一个字都不丢且反复渲染不会越长越高、连「列数 × 3 列」都放不下时兜底输出也折行）、版本号只有一个读取处（含界面与文档 —— 侧栏写死过版本号，一直没人核对）、桌面端地址拼装（没有 host 时用主进程报的端口，拿不到就返回 `null` 而不是拼出 `ws:///ws`）。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据。
+- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` / `tests/ui.test.ts` / `tests/version.test.ts` / `tests/electron-boot.test.ts` / `tests/source-utils.test.ts` / `tests/ansi-source.test.ts` / `tests/subagents.test.ts` / `tests/agents-command.test.ts` / `tests/workspace-ctx.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则（含与 prompt_toolkit 的**格式往返** —— 把官方 `FileHistory.load_history_strings()` 的读取算法照抄进测试当契约，而不是拿自家实现的假设去测自家实现）、控制台宽度的口径（`panel` 每一行的显示宽度只有一个值、窄终端才截断、`📋` 算 2 列而 `⚡` 算 1 列）、Markdown 表格（中文列也对齐、已经对齐的表格再渲染一遍不再变、带竖线的命令行不会被吃成表格、`\|` 转义后能原样读回来、超宽表格按面板宽度收窄后不被 `panel` 二次截断、超宽单元格折行后一个字都不丢且反复渲染不会越长越高、连「列数 × 3 列」都放不下时兜底输出也折行）、版本号只有一个读取处（含界面与文档 —— 侧栏写死过版本号，一直没人核对）、桌面端地址拼装（没有 host 时用主进程报的端口，拿不到就返回 `null` 而不是拼出 `ws:///ws`）、子代理的工具白名单与派发计划（含两条结构锁：被封锁的工具名**即使出现在可用列表里也必须被拒**，白名单必须**同时**管住绑给模型的和 `ToolNode` 能执行的两份 —— 只过滤前者的话白名单就是假锁）、工作目录上下文的还原（同步 / 异步 resolve / 异步 reject / 同步 throw 四条出口逐条钉住，另有一条反向对照证明「不包裹时确实会泄漏」）。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据 —— 同一条理由也让「哪些工具能进 `ToolNode`」这条判定从 `tools/index.ts` 拆到了零依赖的 `tools/executable.ts`，好让它可以被单独测。
 - `tests/cli-spawn.test.ts` —— 入口冒烟层。**真的把 CLI 当子进程跑起来**，断言 stdout / stderr / 退出码。这一层存在的理由：上一轮那个「入口守卫在 Windows 上永不成立、`npm run dev` 一行输出都没有」的故障，在所有纯函数测试里都是绿的 —— 被测函数一个都没被调用。判据很朴素：**stdout 是空的就说明 `main()` 压根没跑**。启动面板的对齐也量在这里：喂假数据量不出「终端列数 + 真实内容」组合出来的宽度。
 
 - 所有「读源码做断言」的结构锁共用一个地基：`tests/source-utils.ts` 的 `stripComments`（此前 `tests/` 下有三份拷贝，一起漂移）。它的契约只有一句 —— **只丢注释，别的一律原样保留**。两条会破坏契约的词法各栽过一次，每次的后果都不是「锁松了一点」而是**锁判错**：字符串里的 `//`（URL 的 `://` 一出现，「`ws://` 只有一处」这类锁就对写坏的代码判绿）；**正则字面量里的引号/反引号**（本仓库那两条匹配行内代码与加粗的正则就把反引号写进了字符类，`src/ui.ts` 与 `vscode/src/panel.ts` 实测中招 —— 扫描器在正则的引号处失步后，**从那一行起注释不再被剥**，注释里的反面示例又被当成实现，连栽过的假红原地复活）。`tests/source-utils.test.ts` 逐形态钉住这些边界，另有一条总闸：**全仓源码剥完后不得残留任何注释行** —— 任何新词法让扫描器失步都会在那里现形，不必事先枚举触发形态。

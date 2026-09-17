@@ -31,7 +31,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   { name: "/todo", usage: "/todo", desc: "查看当前任务计划" },
   { name: "/skills", usage: "/skills", desc: "列出已发现的技能 (SKILL.md)" },
   { name: "/mcp", usage: "/mcp", desc: "查看 MCP server 配置与连接状态" },
-  { name: "/agents", usage: "/agents", desc: "子代理（TS 版尚未接入，见 python_legacy）" },
+  { name: "/agents", usage: "/agents", desc: "子代理：可用预设 + 本次会话的运行记录" },
   { name: "/config", usage: ["/config", "/config set K V"], desc: "显示配置 / 修改配置" },
   { name: "/model", usage: "/model", desc: "查看/切换模型 (如 /model deepseek)" },
   { name: "/save", usage: "/save", desc: "保存当前对话" },

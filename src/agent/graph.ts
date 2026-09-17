@@ -23,7 +23,7 @@ import {
 import { StateAnnotation, type AgentState, type LlmUsage } from "./state.js";
 import { buildSystemPrompt } from "./prompts.js";
 import { Config, type ModelConfig } from "../config.js";
-import { ALL_TOOLS, EXECUTABLE_TOOLS } from "../tools/index.js";
+import { ALL_TOOLS, executableOf } from "../tools/index.js";
 import { mcpManager } from "../mcp/manager.js";
 import type { StructuredToolInterface } from "@langchain/core/tools";
 import { setWorkspace } from "../workspace_ctx.js";
@@ -273,7 +273,16 @@ export class CodingAgent {
   constructor(
     modelConfig: ModelConfig,
     mcpTools: StructuredToolInterface[] = [],
-    extraTools: StructuredToolInterface[] = []
+    extraTools: StructuredToolInterface[] = [],
+    /**
+     * 工具白名单（`null` = 不过滤，主代理走这条）。
+     *
+     * SubAgent 用它把自己限制在一小组工具里。这是**唯一**能让子代理看不见
+     * `ask_user` / `spawn_subagent` 的地方：传进来的名字会同时过滤掉「绑给 LLM 的」
+     * 与「`ToolNode` 能执行的」两份 —— 只过滤前者的白名单是假锁，模型照样能写出
+     * 一个没绑定的工具调用，而它会被 `ToolNode` 执行。
+     */
+    allowTools: readonly string[] | null = null
   ) {
     this.modelConfig = modelConfig;
     Config.validate();
@@ -294,13 +303,15 @@ export class CodingAgent {
       temperature: 0.0,
     });
 
-    // 动态工具池: 内置 + Skills + MCP + 环境专属工具 (如 VS Code API)
+    // 动态工具池: 内置 + Skills + 子代理 + MCP + 环境专属工具 (如 VS Code API)
     this.mcpTools = mcpTools;
-    this.allTools = [...ALL_TOOLS, ...mcpTools, ...extraTools];
-    const executable = [...EXECUTABLE_TOOLS, ...mcpTools, ...extraTools];
+    const pool = [...ALL_TOOLS, ...mcpTools, ...extraTools];
+    const allowed =
+      allowTools === null ? pool : pool.filter((t) => allowTools.includes(t.name));
 
+    this.allTools = allowed;
     this.llmWithTools = this.llm.bindTools(this.allTools);
-    this.executableToolNode = new ToolNode(executable);
+    this.executableToolNode = new ToolNode(executableOf(allowed));
     this.graph = buildGraph(this);
   }
 
@@ -318,10 +329,16 @@ export class CodingAgent {
     }
   }
 
-  async invoke(state: AgentState): Promise<AgentState> {
+  /**
+   * 同步跑完一次对话。
+   *
+   * `recursionLimit` 可覆盖：SubAgent 用自己那份（比主代理小，见 `subagent_manager.ts`），
+   * 不给则用 `Config.MAX_TOOL_ITERATIONS` 推出来的默认值。
+   */
+  async invoke(state: AgentState, recursionLimit?: number): Promise<AgentState> {
     const result = await this.graph.invoke(
       state as unknown as typeof StateAnnotation.State,
-      { recursionLimit: getRecursionLimit() }
+      { recursionLimit: recursionLimit ?? getRecursionLimit() }
     );
     return result as unknown as AgentState;
   }
@@ -494,10 +511,11 @@ async function connectMcpOnce(): Promise<StructuredToolInterface[]> {
 
 export async function createCodingAgent(
   modelName?: string | null,
-  extraTools: StructuredToolInterface[] = []
+  extraTools: StructuredToolInterface[] = [],
+  allowTools: readonly string[] | null = null
 ): Promise<CodingAgent> {
   Config.validate();
   const mcpTools = await connectMcpOnce();
   const modelConfig = Config.getModelConfig(modelName ?? null);
-  return new CodingAgent(modelConfig, mcpTools, extraTools);
+  return new CodingAgent(modelConfig, mcpTools, extraTools, allowTools);
 }
