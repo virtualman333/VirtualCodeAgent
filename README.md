@@ -345,6 +345,7 @@ npm run electron:dist:win # 完整打包（tsc + web + electron + electron-build
 | `raw-device-write` | `dd` 往 `/dev/*` 或整盘写数据 |
 | `chmod-chown-root` | 给根目录改权限 / 属主（`chmod -R 777 /`、`chown -R root /`） |
 | `powershell-destructive` | `Remove-Item -Recurse -Force C:\`、`Format-Volume`、`Clear-Disk` |
+| `powershell-encoded-command` | `powershell -EncodedCommand <base64>` —— 命令被编码，护栏读不出内容，所以直接拦 |
 | `fork-bomb` | `:(){ :|:& };:` |
 
 判定前会先**归一化** —— 折叠空白、剥掉 `sh -c` / `bash -c` / `cmd /c` / `powershell -Command`
@@ -365,9 +366,30 @@ sudo rm -rf /                    # 提权不改变危险程度
 `dd if=./disk.img of=./copy.img` 都照常放行。一个乱杀命令的护栏会被用户和模型一起绕开，
 比没有护栏更坏，所以 `tests/command-guard.test.ts` 里有一份 40 条的良性回归集。
 
+**命令词前面挂什么都不影响判定。** 早期版本默认「命令词就是第一个词」，
+只特判了 `sudo` 一个前缀 —— 于是「`sudo` 后面跟个选项」就把这一格又丢了。现在改按一张
+显式的**启动器表**剥前缀，表里每条都带它自己的选项与参数（`sudo -u root rm -rf /` 里的
+`-u root` 要一起跳掉，`timeout 30 rm -rf /` 里的 `30` 也一样）；`su -c "…"` 这种
+「选项的值本身就是命令」的会继续往里剥：
+
+```bash
+nohup rm -rf /                    # 挂个 nohup
+env FOO=1 rm -rf /                # env + 前置赋值
+timeout 30 rm -rf /               # 包一层超时
+sudo -u root rm -rf /             # sudo 后面带选项（这一格曾经整个丢过）
+nohup bash -c 'rm -rf /'          # 先挂启动器、再套一层 shell —— 两层都要剥
+powershell -c "Remove-Item -Recurse -Force C:\"    # PowerShell 的 `-c` 就是 `-Command`
+```
+
+启动器表是 `src/tools/command_guard.ts` 里的 `LAUNCHERS`；**故意不认**的那几个
+（`at` / `batch` / `qsub` / `systemd-run`）连同理由写在 `tests/command-guard.test.ts` 里，
+并且是**两向对账**：表里少一条、多一条、或者「登记成例外却其实已经认了」，测试都会红。
+每个启动器还有一条按真实写法手写的探针 —— 表里的任何一行都不是死数据。
+
 **它不是沙箱**：这是安全带。`node -e "require('fs').rmSync('/',{recursive:true})"`
-这类「换一种语言做同一件事」的写法不在覆盖范围内；模型也仍然会在你的工作目录里
-跑构建、装依赖、改文件。要真隔离请用容器或受限账号。
+这类「换一种语言做同一件事」的写法不在覆盖范围内（连内容都读不出来的
+`powershell -EncodedCommand` 属于另一种情况：读不出来就不猜，直接拦）；
+模型也仍然会在你的工作目录里跑构建、装依赖、改文件。要真隔离请用容器或受限账号。
 
 被拦时返回的第一行是 `[BLOCKED] 危险命令被拦截（<家族>）：<理由>` —— 带上家族和理由，
 模型才知道为什么不行、该怎么换，而不是反复重试同一条。

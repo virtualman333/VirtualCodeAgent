@@ -30,6 +30,25 @@
  *      `mkfs_helper.ts` 这些**必须放行** —— 一个乱杀命令的护栏会被用户直接绕开，
  *      比没有护栏更坏。见 `tests/command-guard.test.ts` 的良性回归集。
  *
+ * 第二轮（命令词前面挂东西）
+ * ------------------------
+ * 上面这一版的 family 判据都默认了一件没写下来的事：**命令词就在 `tokens[0]`**。
+ * 于是为了挡住 `sudo rm -rf /`，`stripElevation()` 变成了「剥掉开头的 `sudo` / `doas`」——
+ * 一个特判。特判只能挡住它自己那一格，实测：
+ *
+ *   - `sudo -u root rm -rf /`、`sudo -E rm -rf /` —— `sudo` 后面跟了选项，head 变成 `-u` / `-E`
+ *   - `nohup rm -rf /`、`env rm -rf /`、`time rm -rf /`、`nice rm -rf /`、`command rm -rf /`
+ *   - `nohup bash -c 'rm -rf /'`、`sudo nohup rm -rf /`
+ *
+ * **七个家族，条条放行** —— 因为判据看的是 `tokens[0]`，而挂一个词就能把它挪开。
+ * 这是同一缺陷形状的第二次出现（第一次是 `sudo`），按「第二次就换修法」的口径，
+ * 不再往特判表里加词，而是把这件事本身变成判据：**命令头定位**（见 `LAUNCHERS`）。
+ *
+ * 另一类同样的前提错误：**命令必须是我们读得出来的明文**。
+ * `powershell -c "…"`（`-c` 就是 `-Command` 的无歧义缩写）此前完全没被展开；
+ * `powershell -EncodedCommand <base64>` 更彻底 —— 内容被编码，护栏读不出来，
+ * 但 PowerShell 会照跑。这类「读不出内容」的写法只能拦，不能猜。
+ *
  * **它不是什么**：这是安全带，不是沙箱。`node -e "require('fs').rmSync('/',…)"`
  * 这类「换一种语言做同一件事」的写法不在覆盖范围内，README 里如实写明。
  */
@@ -51,11 +70,24 @@ export function normalize(command: string): string {
   return String(command ?? "").replace(/\s+/g, " ").trim();
 }
 
+/**
+ * PowerShell 允许只写参数名的**无歧义前缀**，所以 `-c` / `-co` / … / `-command` 是同一个参数。
+ *
+ * 这里刻意用**枚举**而不是嵌套可选链（`-c(?:o(?:m(?:…)?)?)?`）：
+ * 那种写法少一个 `?` 就会把最外层变成必选，于是只认 `-com` 以上，而 `-c` 静默放行 ——
+ * 本轮第一版就是这么写的，实测才发现。枚举的每一项都能一眼数出来。
+ */
+const PS_ABBREV = (full: string): string =>
+  `-(?:${Array.from({ length: full.length }, (_, i) => full.slice(0, i + 1)).join("|")})(?![a-z0-9])`;
+
+const PS_COMMAND = PS_ABBREV("command");
+
 /** shell 包装器：剥掉之后内层命令要按同样标准判 */
 const WRAPPERS: RegExp[] = [
   /^(?:ba|z|da|k)?sh\s+-c\s+/i,
   /^cmd(?:\.exe)?\s+\/[ck]\s+/i,
-  /^(?:powershell|pwsh)(?:\.exe)?\s+(?:-\w+\s+)*-command\s+/i,
+  // `-EncodedCommand` **不在**这里：它不是「剥一层再看」，而是内容读不出来，见 family 表。
+  new RegExp(`^(?:powershell|pwsh)(?:\\.exe)?\\s+(?:-\\w+\\s+)*${PS_COMMAND}\\s*`, "i"),
 ];
 
 /** 剥掉包装层与最外层引号（可多层，`bash -c 'bash -c "rm -rf /"'`） */
@@ -101,17 +133,132 @@ export function tokenize(segment: string): string[] {
 }
 
 /**
- * 去掉前置提权词，并把 `\rm` 归一成 `rm`。
+ * 启动器（launcher）：跑在你那条命令**前面**、替它改环境/权限/时限的那些词。
  *
- * **提权不改变危险程度** —— `sudo rm -rf /` 与 `rm -rf /` 必须同罪。
- * 这一条是实测补上的：第一版把 `sudo` 当成命令名，于是 `sudo rm -rf /` 从「旧版能拦」
- * 变成「新版漏了」——**修护栏时把已有的那一格丢掉，比不修更坏**。
+ * 每个家族判据都长成 `t[0] === "rm"` 这样 —— 「命令词在第一个 token 上」。
+ * 这个前提是错的：shell 允许在前面挂任意多个词。上一版只特判了 `sudo`，
+ * 于是 `sudo -u root rm -rf /`（`sudo` 后面跟了选项）立刻变成放行。
+ *
+ * 所以这里不列举「危险命令怎么拼」，而是回答一个更早的问题：**命令词到底在第几个 token 上**。
+ *   - `value`：这个启动器的哪些选项**带值** —— 值必须一起跳掉。
+ *     少了它，`sudo -u root rm -rf /` 里的 `root` 会被当成命令词（就是上面那个洞）。
+ *   - `command`：哪些选项的**值本身就是一条要执行的命令**（`su -c "rm -rf /"`）——
+ *     不是跳掉，是剥出来接着判。
+ *   - `positional`：启动器自己会先吃掉几个位置参数（`timeout 30 rm …` 里的 `30`）。
+ *
+ * 认定口径保守：**表里没有的词一律不当启动器**。宁可漏（README 已写明这不是沙箱），
+ * 也不能误判 —— 一个乱杀命令的护栏会被用户和模型一起绕开。
  */
-export function stripElevation(tokens: string[]): string[] {
-  const out = tokens.slice();
-  while (out.length > 1 && /^(sudo|doas)$/i.test(out[0])) out.shift();
-  if (/^\\rm$/.test(out[0] ?? "")) out[0] = "rm";
-  return out;
+export interface LauncherSpec {
+  value?: string[];
+  command?: string[];
+  positional?: number;
+}
+
+export const LAUNCHERS: Record<string, LauncherSpec> = {
+  // 只列**真的带值**的选项。把无值选项写进来，后果是它会把下一个 token（也就是命令词）当值吞掉 ——
+  // 那是这个文件正在修的同一类错误，方向相反而已。所以 `sudo -h`（= --help）、`-E`、`-n`、`-i`
+  // 这些一律不进表：跳过它们自己就行，`sudo -h rm -rf /` 照样应该按 `rm -rf /` 判。
+  sudo: {
+    value: ["-u", "--user", "-g", "--group", "-p", "--prompt", "-C", "--close-from",
+            "-r", "--role", "-t", "--type", "-U", "--other-user",
+            "-T", "--command-timeout", "-D", "--chdir", "-R", "--chroot"],
+  },
+  doas: { value: ["-u", "-C"] },
+  env: { value: ["-u", "--unset", "-C", "--chdir", "-S", "--split-string"] },
+  nohup: {},
+  time: { value: ["-f", "--format", "-o", "--output"] },
+  nice: { value: ["-n", "--adjustment"] },
+  ionice: { value: ["-c", "-n", "-p", "-P", "-u"] },
+  // `timeout 30 rm -rf /` / `timeout -k 5 30 rm -rf /` —— DURATION 是必给的
+  timeout: { value: ["-s", "--signal", "-k", "--kill-after"], positional: 1 },
+  // `chroot /newroot rm -rf /` —— NEWROOT 是必给的
+  chroot: { value: ["--userspec", "--groups", "-u", "-g"], positional: 1 },
+  // `su -c "…"` 里 `-c` 的值就是命令本身；`su root -c "…"` 里 user 是位置参数
+  su: { command: ["-c", "--command"], positional: 1, value: ["-s", "--shell", "-g", "--group", "--supp-group"] },
+  runuser: { command: ["-c", "--command"], value: ["-s", "--shell", "-g", "--group", "-u", "--user"] },
+  command: {},
+  builtin: {},
+  exec: {},
+  setsid: {},
+  stdbuf: { value: ["-i", "-o", "-e", "--input", "--output", "--error"] },
+  strace: { value: ["-o", "--output", "-p", "--attach", "-e", "--trace", "-s", "--string-limit", "-P", "--trace-path"] },
+  ltrace: { value: ["-o", "--output", "-p", "--attach", "-e"] },
+  // `xargs -i` 是**无值**的旧写法（等价于 `-I{}`），`-I` 才带值
+  xargs: {
+    value: ["-n", "--max-args", "-I", "--replace", "-P", "--max-procs", "-d", "--delimiter",
+            "-E", "--eof", "-L", "--max-lines", "-s", "--max-chars", "-a", "--arg-file"],
+  },
+  watch: { value: ["-n", "--interval"] },
+  // macOS 的「别睡觉」，纯包装：真正的命令就是跟在它后面的那个
+  caffeinate: { value: ["-t", "--timeout", "-w", "--wait-for"] },
+};
+
+/** 前置赋值 `FOO=bar rm -rf /` —— 它不改变后面那条命令的危险程度 */
+const ASSIGNMENT = /^[A-Za-z_][A-Za-z0-9_]*=/;
+
+/**
+ * 定位真正的命令词，返回**从它开始**的 token 列表。
+ *
+ * 反复剥「启动器 + 它自己的选项/参数」，直到剩下一个不是启动器的词。
+ * 全程不增不减 token 之外的东西 —— `\rm` 归一成 `rm`，`su -c "…"` 的值会被重新 token 化。
+ *
+ * 命名说明：以前叫 `stripElevation`，只剥 `sudo` / `doas`。名字一旦只描述特判，
+ * 下一个人就会以为「开头挂别的词不用管」，那正是这个洞的成因。
+ */
+export function stripLaunchers(tokens: string[]): string[] {
+  let t = tokens.slice();
+  for (let depth = 0; depth < 5 && t.length > 1; depth++) {
+    if (/^\\rm$/.test(t[0])) t[0] = "rm";
+    if (ASSIGNMENT.test(t[0])) { t = t.slice(1); continue; }
+
+    const spec = LAUNCHERS[t[0].toLowerCase()];
+    if (!spec) break;
+
+    let i = 1;
+    let posLeft = spec.positional ?? 0;
+    let inner: string[] | null = null;
+    while (i < t.length) {
+      const tok = t[i];
+      if (tok === "--") { i++; break; }
+      const eq = tok.indexOf("=");
+      const key = (eq > 0 ? tok.slice(0, eq) : tok).toLowerCase();
+      const inline = eq > 0;                      // `--user=root` 的值在同一个 token 里
+
+      if (spec.command?.some((o) => o === key) && /^-/.test(tok)) {
+        const val = inline ? tok.slice(eq + 1) : (i + 1 < t.length ? t[i + 1] : "");
+        inner = tokenize(val).concat(t.slice(i + (inline ? 1 : 2)));
+        break;
+      }
+      if (/^-/.test(tok) && tok !== "-") {
+        i += spec.value?.some((o) => o === key) && !inline ? 2 : 1;
+        continue;
+      }
+      if (posLeft > 0) { posLeft--; i++; continue; }  // 启动器自己的位置参数（`timeout 30`）
+      break;                                          // 到命令词了
+    }
+
+    if (inner) return stripLaunchers(inner);
+    const rest = t.slice(i);
+    if (!rest.length) break;                       // 只剩启动器、没有命令 —— 原样返回，不切空
+    t = rest;
+  }
+  return t.length ? t : tokens;
+}
+
+/**
+ * `stripLaunchers` 的文本版：剥掉启动器前缀后的命令串；**头词没变就返回 `null`**。
+ *
+ * 为什么两个剥法不能只留一个：`nohup bash -c 'rm -rf /'` 要连着剥两层 ——
+ * 先剥启动器（`nohup`，token 级），再剥 shell 包装（`bash -c`，字符串级）。
+ * 只在 token 上剥的话第二层没人管，只在字符串上剥的话第一层没人管，
+ * 于是「先挂个启动器、再套一层 shell」又是一条通道。所以候选集里两者都放，**并且能叠加**。
+ */
+export function stripLaunchersText(command: string): string | null {
+  const tokens = tokenize(command);
+  const stripped = stripLaunchers(tokens);
+  if (!stripped.length || stripped[0] === tokens[0]) return null;
+  return stripped.join(" ");
 }
 
 /**
@@ -148,11 +295,21 @@ function isDriveRoot(p: string): boolean {
   return /^[a-z]:[\\/]*\*?$/i.test(String(p ?? "").trim());
 }
 
-/** 各家族的判据。返回非空字符串 = 拦，字符串就是理由。t 已去过提权词。 */
+/** 各家族的判据。返回非空字符串 = 拦，字符串就是理由。t 已去过提权/启动器前缀。 */
 const FAMILIES: Array<{ name: string; test: (t: string[], seg: string) => string }> = [
   {
     name: "fork-bomb",
     test: (_t, seg) => (/:\s*\(\s*\)\s*\{[^}]*\|[^}]*&[^}]*\}\s*;?\s*:/i.test(seg) ? "shell fork 炸弹" : ""),
+  },
+  {
+    name: "powershell-encoded-command",
+    // `-EncodedCommand` 及其无歧义缩写 —— 命令被 Base64 包起来，护栏读不出内容，
+    // 但 PowerShell 会照跑。这是绕过「读命令名再判」这类护栏最标准的一招：宁可拦。
+    // （判的是 seg 而不是 t：这段里 head 就是 `powershell` 本身，剥不出内层命令。）
+    test: (_t, seg) =>
+      new RegExp(`^(?:powershell|pwsh)(?:\\.exe)?\\s+(?:-\\w+\\s+)*${PS_ABBREV("encodedcommand")}`, "i").test(seg)
+        ? "PowerShell 的 -EncodedCommand：命令被编码，护栏读不出内容"
+        : "",
   },
   {
     name: "format-disk",
@@ -244,8 +401,9 @@ const FAMILIES: Array<{ name: string; test: (t: string[], seg: string) => string
 /**
  * 判定一条命令是否危险。
  *
- * 会把「原串 / 每条 segment / 每层剥包装后的形态」都收进候选集再判 ——
- * 否则 `sh -c "rm -rf ~"` 与 `rm -rf ~` 不同罪。
+ * 把「原串 / 每条 segment / 每层往内剥出来的形态」都收进候选集再逐条判 ——
+ * 否则 `sh -c "rm -rf ~"`、`nohup bash -c "rm -rf /"` 与 `rm -rf ~` 不同罪。
+ * 两种剥法（包装层 / 启动器）都进队列，所以能叠加，不是各剥一层就完事。
  */
 export function checkCommand(command: string): GuardVerdict {
   const raw = normalize(command);
@@ -254,15 +412,17 @@ export function checkCommand(command: string): GuardVerdict {
   const seen = new Set<string>();
   const queue: string[] = [raw, ...splitSegments(raw)];
   for (let i = 0; i < queue.length && seen.size < 200; i++) {
-    for (const cand of new Set([queue[i], unwrap(queue[i])])) {
-      if (seen.has(cand)) continue;
-      seen.add(cand);
-      queue.push(...splitSegments(cand));
+    const cur = queue[i];
+    if (seen.has(cur)) continue;
+    seen.add(cur);
+    for (const next of [unwrap(cur), stripLaunchersText(cur)]) {
+      if (!next || next === cur) continue;
+      queue.push(next, ...splitSegments(next));
     }
   }
 
   for (const seg of seen) {
-    const t = stripElevation(tokenize(seg));
+    const t = stripLaunchers(tokenize(seg));
     for (const fam of FAMILIES) {
       const why = fam.test(t, seg);
       if (why) return { blocked: true, family: fam.name, reason: why };
