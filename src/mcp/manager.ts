@@ -197,9 +197,16 @@ export class MCPManager {
     return [MCP_CONFIG_FILE, path.join(getWorkspace(), ".vca", "mcp.json")];
   }
 
-  /** 读取 MCP 配置 (用户级 + 项目级, 后者覆盖前者) */
-  loadConfig(): McpServer[] {
-    const servers = new Map<string, McpServerConfig>();
+  /**
+   * 读配置，并带上「这一条是从哪个文件来的」。
+   *
+   * 为什么要带上来源：读取是**两个文件合并**（项目级覆盖用户级），
+   * 而设置页保存时传的是「合并之后的完整列表」。如果按合并结果整体覆盖写某一个文件，
+   * 那么来自另一个文件的条目就永远删不掉、改不动 —— 读取与写入不是同一份路径。
+   * 有了来源，保存时就能按来源回写（见 settings.saveMcpConfig）。
+   */
+  loadConfigWithSources(): Array<{ name: string; config: McpServerConfig; file: string }> {
+    const servers = new Map<string, { config: McpServerConfig; file: string }>();
     for (const file of this.configFiles()) {
       try {
         if (!fs.existsSync(file)) continue;
@@ -209,14 +216,20 @@ export class MCPManager {
         const cfg = data.servers ?? {};
         for (const [name, serverCfg] of Object.entries(cfg)) {
           if (serverCfg && typeof serverCfg === "object") {
-            servers.set(name, serverCfg);
+            // 后面的文件覆盖前面的 —— 与「项目级覆盖用户级」一致
+            servers.set(name, { config: serverCfg, file });
           }
         }
       } catch {
         continue;
       }
     }
-    return [...servers.entries()].map(([name, config]) => ({ name, config }));
+    return [...servers.entries()].map(([name, v]) => ({ name, config: v.config, file: v.file }));
+  }
+
+  /** 读取 MCP 配置 (用户级 + 项目级, 后者覆盖前者) */
+  loadConfig(): McpServer[] {
+    return this.loadConfigWithSources().map(({ name, config }) => ({ name, config }));
   }
 
   /** 连接所有配置的 servers 并收集工具 (失败不阻塞) */

@@ -18,7 +18,6 @@ import {
 } from "./config.js";
 import { getAllSkills, getSkill } from "./skills/manager.js";
 import { mcpManager } from "./mcp/manager.js";
-import { getWorkspace } from "./workspace_ctx.js";
 
 // ============================================================
 // 通用配置
@@ -129,6 +128,8 @@ export interface McpServerConfigView {
   command?: string;
   args?: string[];
   url?: string;
+  /** 这条是从哪个文件读来的。界面上能显示它，也决定保存时回写到哪个文件 */
+  source_file?: string;
 }
 
 export interface McpSettingsView {
@@ -139,13 +140,13 @@ export interface McpSettingsView {
 
 /** 读取 mcp 配置 (不含密钥等敏感字段的展示) */
 export function getMcpSettings(): McpSettingsView {
-  const config = mcpManager.loadConfig();
-  const servers = config.map((s) => ({
-    name: s.name,
-    transport: s.config.transport ?? "stdio",
-    command: s.config.command,
-    args: s.config.args,
-    url: s.config.url,
+  const servers = mcpManager.loadConfigWithSources().map(({ name, config: s, file }) => ({
+    name,
+    transport: s.transport ?? "stdio",
+    command: s.command,
+    args: s.args,
+    url: s.url,
+    source_file: file,
   }));
   return {
     servers,
@@ -155,28 +156,65 @@ export function getMcpSettings(): McpSettingsView {
 }
 
 /**
- * 保存 MCP 配置到 <workspace>/.vca/mcp.json (项目级)。
- * 前端传完整 servers 数组, 覆盖写入。
+ * 保存 MCP 配置。前端传的是「界面上看到的完整 servers 数组」。
+ *
+ * ⚠ 关键：**读取是两个文件的合并**（`~/.vca/mcp.json` 打底，`<workspace>/.vca/mcp.json`
+ * 覆盖），而保存必须按**每条的来源回写**到它自己的那个文件。
+ *
+ * 早先的写法是把传进来的整个数组覆盖写进项目级那一个文件。于是：
+ *   - 在设置页删掉一个来自 `~/.vca/mcp.json` 的 server → 那个文件没被动过，
+ *     下次读取它又回来了（接口返回 `ok`，界面上却「删不掉」）；
+ *   - 改一个来自用户级文件的 server → 项目级多出一份影子副本，用户级那份还在，
+ *     换个工作空间打开设置又看到旧的。
+ * 都是「写入路径 ≠ 读取路径」这一个根因。
+ *
+ * 新条目的去处是**优先级最高**的那个文件（也就是项目级），与旧行为一致。
  */
 export function saveMcpConfig(servers: McpServerConfigView[]): { ok: boolean; error?: string } {
-  try {
-    const target = path.join(getWorkspace(), ".vca", "mcp.json");
-    fs.mkdirSync(path.dirname(target), { recursive: true });
-    const out: Record<string, unknown> = {};
-    for (const s of servers) {
-      if (!s.name || !s.name.trim()) continue;
-      const cfg: Record<string, unknown> = { transport: s.transport ?? "stdio" };
-      if (cfg.transport === "http" || cfg.transport === "sse") {
-        if (!s.url) return { ok: false, error: `server ${s.name} 需要 url` };
-        cfg.url = s.url;
-      } else {
-        if (!s.command) return { ok: false, error: `server ${s.name} 需要 command` };
-        cfg.command = s.command;
-        cfg.args = s.args ?? [];
-      }
-      out[s.name] = cfg;
+  const files = mcpManager.configFiles();
+  const projectFile = files[files.length - 1];
+
+  const want = new Map<string, Record<string, unknown>>();
+  const order: string[] = [];
+  for (const s of servers) {
+    if (!s || !s.name || !String(s.name).trim()) continue;
+    const name = String(s.name).trim();
+    const cfg: Record<string, unknown> = { transport: s.transport ?? "stdio" };
+    if (cfg.transport === "http" || cfg.transport === "sse") {
+      if (!s.url) return { ok: false, error: `server ${name} 需要 url` };
+      cfg.url = s.url;
+    } else {
+      if (!s.command) return { ok: false, error: `server ${name} 需要 command` };
+      cfg.command = s.command;
+      cfg.args = s.args ?? [];
     }
-    fs.writeFileSync(target, JSON.stringify({ servers: out }, null, 2), "utf-8");
+    want.set(name, cfg);
+    order.push(name);
+  }
+
+  const origins = new Map(
+    mcpManager.loadConfigWithSources().map((s) => [s.name, s.file])
+  );
+
+  // 每条写回它自己的来源文件；没见过的写项目级
+  const byFile = new Map<string, string[]>();
+  for (const name of order) {
+    const target = origins.get(name) ?? projectFile;
+    if (!byFile.has(target)) byFile.set(target, []);
+    byFile.get(target)!.push(name);
+  }
+  /* 曾经有过条目的文件一律重写一遍：**删掉的条目正是从这里消失的**。
+     顺带会清掉「同名但被项目级盖住」的那份影子副本 —— 它对读取本来就没有影响，
+     留着只会在别的工作空间里冒出来。 */
+  for (const file of origins.values()) if (!byFile.has(file)) byFile.set(file, []);
+
+  try {
+    for (const [file, names] of byFile) {
+      const out: Record<string, unknown> = {};
+      for (const n of names) out[n] = want.get(n);
+      fs.mkdirSync(path.dirname(file), { recursive: true });
+      fs.writeFileSync(file, JSON.stringify({ servers: out }, null, 2), "utf-8");
+    }
     return { ok: true };
   } catch (e) {
     return { ok: false, error: (e as Error).message };

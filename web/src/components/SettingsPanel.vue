@@ -42,6 +42,8 @@ interface McpServerView {
   args?: string[];
   argsText?: string;
   url?: string;
+  /** 这条是从哪个文件读来的（保存时回写到同一个文件） */
+  source_file?: string;
 }
 
 interface McpSettings {
@@ -279,6 +281,11 @@ const skillsCount = computed(() => props.settings?.skills.length ?? 0);
               <div class="mcp-row" v-else>
                 <TInput v-model="s.url" placeholder="http://localhost:8000/mcp" />
               </div>
+              <!-- 读的是「用户级 + 本工作空间」两个文件的合并。标出这条来自哪一份，
+                   否则「删了它怎么还在」只能靠猜。新加的还没落盘，就没有这一行。 -->
+              <div v-if="s.source_file" class="mcp-src" :title="s.source_file">
+                存于 {{ s.source_file }}
+              </div>
             </div>
           </div>
 
@@ -447,5 +454,11 @@ label {
 }
 .mcp-row .srv-name {
   flex: 1;
+}
+.mcp-src {
+  font-size: 11px;
+  opacity: 0.6;
+  line-height: 1.4;
+  word-break: break-all;
 }
 </style>
