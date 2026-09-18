@@ -5,23 +5,7 @@ import { exec } from "node:child_process";
 import { tool } from "@langchain/core/tools";
 import { z } from "zod";
 import { getWorkspace } from "../workspace_ctx.js";
-
-// ---- 安全警告命令 ----
-const RISKY_COMMANDS = [
-  "rm -rf /",
-  "del /f /s c:\\",
-  "format ",
-  ":(){ :|:& };:",
-  "chmod 777 /",
-  "sudo rm -rf",
-  "dd if=",
-  "mkfs.",
-];
-
-function isRisky(command: string): boolean {
-  const lower = command.toLowerCase().trim();
-  return RISKY_COMMANDS.some((r) => lower.includes(r.toLowerCase()));
-}
+import { checkCommand } from "./command_guard.js";
 
 function truncateHeadTail(text: string, max: number, head: number, tail: number): string {
   if (text.length <= max) return text;
@@ -34,9 +18,14 @@ export const bash = tool(
   async (input: { command: string; timeout?: number; description?: string }) => {
     const { command, timeout = 120, description = "" } = input;
 
-    if (isRisky(command)) {
+    // 危险性判定在 src/tools/command_guard.js 里（纯函数，可单测）。
+    // 以前这里是本文件里一个 8 条的字符串数组 + 裸 includes —— 一条断言都没有，
+    // 参数顺序/空白/包一层 shell 就能绕过去（实测能绕的写法见该文件抬头）。
+    const verdict = checkCommand(command);
+    if (verdict.blocked) {
       return (
-        `[BLOCKED] 危险命令被拦截: ${command}\n` +
+        `[BLOCKED] 危险命令被拦截（${verdict.family}）：${verdict.reason}\n` +
+        `命令: ${command}\n` +
         `如确实需要执行，请手动在终端中运行。`
       );
     }
@@ -72,7 +61,10 @@ export const bash = tool(
   {
     name: "bash",
     description:
-      "执行 Shell 命令并返回结果。这是运行测试、构建、lint、git 操作、包安装等任务的万能工具。注意：危险命令会被拦截，默认超时 120 秒。",
+      "执行 Shell 命令并返回结果。这是运行测试、构建、lint、git 操作、包安装等任务的万能工具。" +
+      "注意：删根目录 / 格式化磁盘 / 往裸设备写数据这一类不可逆命令会被拦截并说明理由，" +
+      "换成别的写法（多一个空格、调换参数顺序、外面套一层 sh -c）同样会被拦；" +
+      "`rm -rf node_modules` 这类正常清理不受影响。默认超时 120 秒。",
     schema: z.object({
       command: z.string().describe("要执行的 shell 命令"),
       timeout: z.number().int().optional().describe("超时时间 (秒)，默认 120"),

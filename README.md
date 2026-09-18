@@ -11,7 +11,7 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 ## 特性
 
 - **多形态运行**：同一套核心 Agent，可跑在控制台 CLI、独立 Web 面板、VS Code 扩展、或桌面端（Electron）里。
-- **内置工具集**（`src/tools/`）：读文件、搜索（glob / grep）、编辑、写入、执行命令（bash）、提问（ask_user）、任务计划（plan）。
+- **内置工具集**（`src/tools/`）：读文件、搜索（glob / grep）、编辑、写入、执行命令（bash）、提问（ask_user）、任务计划（plan）。执行命令那一环带**危险命令拦截**（删根目录 / 格式化 / 裸设备写入这一类不可逆操作，换写法也拦得住，见下面「命令安全护栏」），正常清理不受影响。
 - **会话持久化**：对话自动保存，可随时 `/load` 恢复历史会话、切换工作空间。
 - **交互式打断**：执行过程中可用 `Ctrl+C` 中断；Agent 遇到歧义时通过 `ask_user` 向用户确认。
 - **交互式输入**：`↑`/`↓` 翻回敲过的内容（**跨会话保留**，与 Python 版**共用同一个历史文件、且双向可读**），`Tab` 补全命令、路径、配置键与模型名；`/input` 可搜索、按条数查看、清空这份历史（不用再一条条按 `↑` 找）。
@@ -330,6 +330,47 @@ npm run electron:dist:win # 完整打包（tsc + web + electron + electron-build
 
 - **端口只有一个来源**。主进程持有 `PORT`（默认 3001），并且**必须**通过 `vca:init` 把它告诉渲染层；渲染层再拿它拼 ws 地址。打包后页面是从磁盘加载的（`file://`），`location.host` 是空串 —— 不拿主进程那个端口就只能拼出 `ws:///ws` 这种连不到任何地方的地址（开发模式下 Vite 会把 `/ws` 代理到 3001，所以**只有打包后才炸**）。地址的拼装只在 `web/src/ws-url.ts` 一处，`tests/electron-boot.test.ts` 盯着。
 - **产物后缀必须与 `type: module` 对付**。esbuild 出的是 CJS，而根 `package.json` 是 `"type": "module"`，所以主进程/preload 的产物是 `.cjs`，`package.json` 的 `main` 指向 `electron/dist/main.cjs`。名字写成 `.js` 的话 Electron 会按 ESM 加载它，第一行 `require("electron")` 就 `ReferenceError: require is not defined in ES module scope`。
+
+---
+
+## 命令安全护栏
+
+`bash` 工具能跑任意 shell 命令，所以它有一道拦截。判定在 `src/tools/command_guard.ts`
+（纯函数，`tests/command-guard.test.ts` 盯着），**包里带哪些**：
+
+| 家族 | 拦什么 |
+|------|--------|
+| `recursive-force-delete` | 递归强制删除根 / 盘符 / 家目录：`rm -rf /`、`rm -rf ~`、`rm -rf "$HOME"`、`rm -rf C:\`、`del /q /s C:\`、`rd /s /q C:\` |
+| `format-disk` / `mkfs` | `format c:`、`format.com c:`、`mkfs.ext4 /dev/sda` |
+| `raw-device-write` | `dd` 往 `/dev/*` 或整盘写数据 |
+| `chmod-chown-root` | 给根目录改权限 / 属主（`chmod -R 777 /`、`chown -R root /`） |
+| `powershell-destructive` | `Remove-Item -Recurse -Force C:\`、`Format-Volume`、`Clear-Disk` |
+| `fork-bomb` | `:(){ :|:& };:` |
+
+判定前会先**归一化** —— 折叠空白、剥掉 `sh -c` / `bash -c` / `cmd /c` / `powershell -Command`
+包装层、剥掉最外层引号 —— 所以下面这些换皮写法同样会被拦：
+
+```bash
+rm  -rf  /                       # 多一个空格
+rm -fr /                         # 参数顺序换一下
+rm -rf --no-preserve-root /      # 多带一个参数
+sh -c "rm -rf ~"                 # 外面套一层
+cmd /c del /q /s C:\             # Windows 侧同理
+cd /tmp && rm -rf /              # 藏在命令链里
+sudo rm -rf /                    # 提权不改变危险程度
+```
+
+反过来也钉死了：**正常清理与只读命令一条都不许拦** —— `rm -rf node_modules`、
+`rd /s /q .\temp`、`chmod 777 ./tmp-output`、`grep -rn 'rm -rf /' docs/`（在文档里搜这句话）、
+`dd if=./disk.img of=./copy.img` 都照常放行。一个乱杀命令的护栏会被用户和模型一起绕开，
+比没有护栏更坏，所以 `tests/command-guard.test.ts` 里有一份 40 条的良性回归集。
+
+**它不是沙箱**：这是安全带。`node -e "require('fs').rmSync('/',{recursive:true})"`
+这类「换一种语言做同一件事」的写法不在覆盖范围内；模型也仍然会在你的工作目录里
+跑构建、装依赖、改文件。要真隔离请用容器或受限账号。
+
+被拦时返回的第一行是 `[BLOCKED] 危险命令被拦截（<家族>）：<理由>` —— 带上家族和理由，
+模型才知道为什么不行、该怎么换，而不是反复重试同一条。
 
 ---
 
