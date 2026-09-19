@@ -62,8 +62,9 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 ├── vscode/              # VS Code 扩展（聊天面板、AskUser 弹窗、工具调用流式展示）
 ├── electron/            # 桌面端外壳（主进程 + preload；由 electron-builder 打包）
 ├── web/                 # 独立 Web 聊天前端（Vue 3 + Vite），同时供桌面端复用
-├── scripts/             # 构建脚本：build-extension.mjs（扩展）/ build-electron.mjs（桌面端）/ publish.mjs（扩展发布）
-├── build-vsix.bat       # 一键构建并打包 VSIX（Windows）
+├── scripts/             # 构建脚本：build-extension.mjs（扩展）/ build-vsix.mjs（构建 + 打 VSIX）
+│                        #          / build-electron.mjs（桌面端）/ publish.mjs（扩展发布）
+├── build-vsix.bat       # `npm run vsix` 的 Windows 包装（只转发，没有第二份逻辑）
 └── python_legacy/       # 早期 Python 实现（已弃用，仅作参考保留）
 ```
 
@@ -308,11 +309,19 @@ npm run web:dev       # 前端 Vite dev server (5173)，代理 /ws → 3001
 ### C. VS Code 扩展
 
 ```bash
-build-vsix.bat        # 完整构建并打包 VSIX（Windows）
+npm run vsix          # 完整构建并打包 VSIX（跨平台，一条命令）
 ```
 
-或在 `vscode/` 目录执行 `npx vsce package`。安装后在命令面板（Ctrl+Shift+P）运行
+产物是 `vscode/vca-coding-agent-<版本>.vsix`（`--skip-web` / `--skip-ext` 可复用已有产物，
+`--no-package` 只构建不打包）。安装后在命令面板（Ctrl+Shift+P）运行
 `VCA: 打开 Coding Agent 聊天面板`，输入任务即可。
+
+`build-vsix.bat` 是同一个脚本的 Windows 包装 —— **只做转发，里面没有第二份构建逻辑**。
+
+> 在 `vscode/` 目录直接 `npx vsce package` 只在**扩展入口已经构建出来**时才可行：
+> `vscode/dist/extension.js` 是构建产物、不随源码入库，干净 clone 上直接跑只会拿到
+> `ERROR Extension entrypoint(s) missing.`（这条以前被 README 当成等价替代写法推荐过）。
+> 所以要么先跑一次 `npm run vsix`，要么就用 `npm run vsix` 本身 —— 它打包前会先预检入口。
 
 > 扩展详细用法见 [`vscode/README.md`](vscode/README.md)。
 

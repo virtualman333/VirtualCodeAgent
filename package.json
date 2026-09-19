@@ -25,6 +25,9 @@
     "test:input": "node --import tsx --test tests/input-history.test.ts tests/completer.test.ts",
     "check": "npm run typecheck:test && npm test",
 
+    "vsix": "node scripts/build-vsix.mjs",
+    "publish:ext": "node scripts/publish.mjs",
+
     "electron:dev": "node scripts/build-electron.mjs --watch",
     "electron:build": "node scripts/build-electron.mjs",
     "electron:run": "electron .",

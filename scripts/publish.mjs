@@ -89,9 +89,10 @@ for (const cmd of ["node", "npm", "npx"]) {
 
 // ---------- 构建 ----------
 if (!opt.skipBuild) {
-  console.log("\n[1/4] 构建扩展 (复用 build-vsix.bat)...");
-  const bat = path.join(rootDir, "build-vsix.bat");
-  run("cmd", ["/c", bat], { cwd: rootDir });
+  console.log("\n[1/4] 构建并打包 (scripts/build-vsix.mjs)...");
+  // 不再外面套一层 *.bat：那条路在 Windows 之外根本走不通。
+  // process.execPath 是真实 exe，显式关掉 shell，免得含空格的参数被再切一遍。
+  run(process.execPath, [path.join(rootDir, "scripts", "build-vsix.mjs")], { cwd: rootDir, shell: false });
 } else {
   console.log("\n[1/4] 跳过构建 (--skip-build)");
 }

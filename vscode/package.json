@@ -75,7 +75,7 @@
   },
   "scripts": {
     "compile": "node ../scripts/build-extension.mjs",
-    "watch": "tsc -watch -p ./"
+    "watch": "node ../scripts/build-extension.mjs --watch"
   },
   "devDependencies": {
     "@types/node": "^22.0.0",
