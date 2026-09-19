@@ -373,7 +373,8 @@ sudo rm -rf /                    # 提权不改变危险程度
 反过来也钉死了：**正常清理与只读命令一条都不许拦** —— `rm -rf node_modules`、
 `rd /s /q .\temp`、`chmod 777 ./tmp-output`、`grep -rn 'rm -rf /' docs/`（在文档里搜这句话）、
 `dd if=./disk.img of=./copy.img` 都照常放行。一个乱杀命令的护栏会被用户和模型一起绕开，
-比没有护栏更坏，所以 `tests/command-guard.test.ts` 里有一份 40 条的良性回归集。
+比没有护栏更坏，所以 `tests/command-guard.test.ts` 里有一份 73 条的良性回归集
+（清单在 `tests/benign-commands.ts`；这里的条数与那份清单**现算对账**，写错了 `npm test` 会红）。
 
 **命令词前面挂什么都不影响判定。** 早期版本默认「命令词就是第一个词」，
 只特判了 `sudo` 一个前缀 —— 于是「`sudo` 后面跟个选项」就把这一格又丢了。现在改按一张
