@@ -38,8 +38,11 @@ import {
   REGEX_AFTER_PUNCT,
   REGEX_AFTER_WORD,
   REPO_ROOT,
+  commentSpansByTs,
+  referenceStrip,
   sourceSurface,
   stripComments,
+  stripDiffProblems,
 } from "./source-utils.js";
 
 test("stripComments: 注释被丢掉，字符串与模板串原样保留", () => {
@@ -657,4 +660,117 @@ test("★ 除号方向的已知边界：会漏剥的形态只有这几种（棘�
   const fat = new Set([...REGEX_AFTER_WORD, "a", "b", "x", "y", "obj", "models", "const"]);
   const wide = stripComments("const x = obj.of / 2; // 尾注释\n", { afterWord: fat });
   assert.ok(!wide.includes("尾注释"), "属性名之后的除号被读成了正则 —— `.` 那条判据没在干活");
+});
+
+// ---------------------------------------------------------------------------
+// 地基的**另一半**：剥得「全不全」。
+//
+// 上面那条总闸（「全仓不得残留注释行」）只对失步的一个方向敏感 —— 注释漏成代码，有余量
+// 可见。另一个方向是**代码被当注释吃掉**，一点痕迹都不留，总闸抓不到：被吃掉的那段里
+// `assert.deepEqual(shown, [])` 之类的断言永远成立。
+//
+// 本轮就是栽在这一侧。模板串的 `${…}` 此前按「字符串里的普通字符」原样照抄，于是
+// 嵌套模板 `` `a${ `//x` }c` `` 的内外两个反引号错配，错配的空档被当成代码，内层正文的
+// `//` 成了行注释，**把它后面直到行尾的代码整段删掉**。形状本身现在还没出现在本仓任何
+// 文件里（真在本仓命中的只有 CRLF 那条，35/56 个文件差一个 `\r`），但一个「出现即静默失效」
+// 的形状不能靠「暂时没写」来兜。
+//
+// 判据换成与 **TypeScript 官方解析器**逐字符对账 —— 真值不再由这份启发式自己说了算。
+// 参考实现本身也换过两版，实测都留着：裸 `createScanner` 会漏模板续接之后的注释
+// （31/56 个文件"有差异"，逐条看过去全是尺子错），只走语义节点会漏空块里的注释
+// （catch 块里那句「忽略」）与对象字面量属性同一行后面的尾注释（`foo(), // 说明`），
+// 16/56 个文件不一致 —— 方向恰好是「参考保留了注释」，一眼看去像是实现多剥了，又把人
+// 往错的一侧引。走到**词法记号**（`node.getChildren(sf)`）才归零。
+// ---------------------------------------------------------------------------
+
+test("★ stripComments 与 TypeScript 官方解析器逐字符对账（全仓，含 CRLF）", () => {
+  const surface = sourceSurface(/\.(ts|vue)$/);
+  assert.deepEqual(surface.problems, [], "扫描面本身不自洽，下面的对账没有意义");
+  assert.ok(surface.files.length >= 50, `扫描面只剩 ${surface.files.length} 个文件 —— 对账的面被砍掉了`);
+
+  const diffs: string[] = [];
+  let spans = 0;
+  let removed = 0;
+  let total = 0;
+  let crlf = 0;
+  const strayComments: string[] = [];
+
+  for (const rel of surface.files) {
+    const src = fs.readFileSync(path.join(REPO_ROOT, rel), "utf8");
+    total += src.length;
+    spans += commentSpansByTs(src).length;
+    const ref = referenceStrip(src);
+    removed += src.length - ref.length;
+    if (src.includes("\r\n")) crlf += 1;
+    for (const p of stripDiffProblems(src)) diffs.push(`${rel}\n    ${p.split("\n").join("\n    ")}`);
+    // 参考实现自己的两个方向：漏剥（行首还像注释）与多剥（体量掉太多）由下面的门限兜
+    for (const line of ref.split(/\r?\n/)) {
+      const t = line.trim();
+      if (t.startsWith("//") || t.startsWith("/*") || t.startsWith("*")) {
+        strayComments.push(`${rel}: ${t.slice(0, 60)}`);
+      }
+    }
+  }
+
+  // 参考实现自证 —— 一把坏尺子量出来的差异清单比没有清单更坏，所以先证明尺子在干活：
+  assert.ok(spans >= 800, `官方解析器只认出 ${spans} 段注释 —— 参考实现自己漏了，对账成了空跑`);
+  assert.ok(
+    removed / total > 0.1,
+    `参考只剥掉 ${((removed / total) * 100).toFixed(1)}% 的体量 —— 它自己就不在干活`
+  );
+  assert.deepEqual(
+    strayComments.slice(0, 3),
+    [],
+    `参考实现剥完之后还剩「像注释的行」—— 它漏剥了，对账会把实现的正确行为判红：\n${strayComments.slice(0, 3).join("\n")}`
+  );
+  assert.ok(crlf >= 30, `CRLF 文件只剩 ${crlf} 个 —— 本仓源码大多是 CRLF，这条对账的 CRLF 面没了`);
+
+  // 正题
+  assert.equal(
+    diffs.length,
+    0,
+    `stripComments 与官方解析器不一致（${diffs.length}/${surface.files.length} 个文件）：\n${diffs.slice(0, 2).join("\n")}`
+  );
+});
+
+test("★ 对账判据自己必须能报出来 —— 否则它是一条永远沉默的检查", () => {
+  // 真实源码 + 真实注入点：把标点表清空（`[`、`<`、`(` 全不在表里），`src/ui.ts` 里那条
+  // 带反引号的字符类正则会退化成「除号」，后面的引号让扫描器失步 —— 与官方解析器必须分道扬镳。
+  const ui = fs.readFileSync(path.join(REPO_ROOT, "src/ui.ts"), "utf8");
+  const problems = stripDiffProblems(ui, { afterPunct: "" });
+  assert.ok(
+    problems.length > 0,
+    "注入了真缺陷，stripDiffProblems 却一个字都没报 —— 全仓对账那条锁是哑的"
+  );
+  assert.ok(
+    problems.some((p) => p.includes("长度")),
+    "报出来的东西里没有「实现 / 真值」长度对照 —— 看的人没法判断是哪一侧多吃/少吃了"
+  );
+});
+
+test("★ `${…}` 插值按代码扫描：嵌套模板不许把后面的代码删掉", () => {
+  const src = "const t = `a${ `//x` }c`; /* 块注释 */ const z = 1;\n";
+  const out = stripComments(src);
+  assert.ok(
+    out.includes("const z = 1;"),
+    `嵌套模板让扫描器失步，后面的代码被当成注释吃掉了：${JSON.stringify(out)}`
+  );
+  assert.ok(out.includes("`a${ `//x` }c`"), `模板串本身必须原样保留：${JSON.stringify(out)}`);
+  assert.ok(!out.includes("块注释"), `同一行里那条块注释还是得剥掉：${JSON.stringify(out)}`);
+  assert.equal(referenceStrip(src), out, "与官方解析器不一致");
+
+  // `${…}` 里面是**代码**：里面的真注释要剥，里面的字符串要留。
+  const inner = "const t = `a${ x /* 注释 */ + '// 字符串' }c`;\n";
+  const out2 = stripComments(inner);
+  assert.ok(!out2.includes("注释"), `插值里的真注释没剥：${JSON.stringify(out2)}`);
+  assert.ok(out2.includes("'// 字符串'"), `插值里的字符串被当成注释了：${JSON.stringify(out2)}`);
+  assert.equal(referenceStrip(inner), out2, "与官方解析器不一致");
+});
+
+test("★ 行注释不许连行尾的 `\\r` 一起吃掉（CRLF）", () => {
+  // 剥完的文本要与源码**逐字节对应**，否则所有按 offset 做定位的检查都会偏一位。
+  const src = "const a = 1; // 尾注释\r\nconst b = 2;\r\n";
+  const out = stripComments(src);
+  assert.equal(out, "const a = 1; \r\nconst b = 2;\r\n", "行尾的 `\\r` 被当成注释内容吃掉了");
+  assert.equal(referenceStrip(src), out, "与官方解析器不一致");
 });
