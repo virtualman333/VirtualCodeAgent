@@ -16,7 +16,7 @@ import fs from "node:fs";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const extDist = path.join(root, "vscode", "dist");
-const webDist = path.join(root, "web", "dist");
+const webDist = path.join(root, "dist-electron");
 const extWebDir = path.join(extDist, "web");
 const outfile = path.join(extDist, "extension.js");
 
@@ -24,7 +24,10 @@ const isWatch = process.argv.includes("--watch");
 
 // ---- 1. 复制前端产物 ----
 if (!fs.existsSync(path.join(webDist, "index.html"))) {
-  console.error("[build-extension] web/dist 不存在，请先执行: cd web && npm install && npm run build");
+  console.error(
+    `[build-extension] 缺少前端产物: ${webDist}\\index.html\n` +
+      "    请先执行: npm run build:web （vite 的 outDir 就是这里，见 web/vite.config.ts）"
+  );
   process.exit(1);
 }
 fs.rmSync(extWebDir, { recursive: true, force: true });

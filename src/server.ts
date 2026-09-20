@@ -2,7 +2,7 @@
  * Web 服务器 - HTTP 静态文件 + WebSocket Agent 服务
  *
  * - 开发模式: 前端用 Vite dev server (5173), 通过代理 /ws → 3001
- * - 生产模式: 本服务直接 serve web/dist, 访问 http://localhost:3001
+ * - 生产模式: 本服务直接 serve 前端构建产物, 访问 http://localhost:3001
  */
 import http from "node:http";
 import fs from "node:fs";
@@ -22,7 +22,17 @@ import {
 } from "./settings.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const WEB_DIST = path.resolve(__dirname, "..", "web", "dist");
+/**
+ * 前端产物目录 = `web/vite.config.ts` 里 `build.outDir` 的指向（**唯一来源**）。
+ *
+ * 这里曾经写的是 `web/dist` —— 而 vite 从来不往那儿写。`npm run build:web`
+ * 之后产物在 `dist-electron/`，于是 README §B（build:web → serve → localhost:3001）
+ * 端出来的是**别的目录里遗留的旧前端**（实测本机 `web/dist` 落后半个月），
+ * 或者在干净克隆里干脆什么都没有（`web/dist` 被 .gitignore 忽略，不存在）。
+ * 打包后 由 electron-builder 的 extraResources 放到 `resources/dist-electron`，
+ * 与本式 `..` 一级的解析一致（见 tests/webdist-agreement.test.ts）。
+ */
+const WEB_DIST = path.resolve(__dirname, "..", "dist-electron");
 const PORT = Number(process.env.PORT || 3001);
 
 // ============================================================
@@ -59,7 +69,7 @@ function serveStatic(req: http.IncomingMessage, res: http.ServerResponse): void 
       res.end(fs.readFileSync(index));
       return;
     }
-    res.writeHead(404).end("Not Found. 请先构建前端: cd web && npm run build");
+    res.writeHead(404).end("Not Found. 请先构建前端: cd web && npm install && npm run build");
     return;
   }
 
@@ -293,6 +303,8 @@ server.listen(PORT, () => {
   console.log(`[VCA-Web] WebSocket: ws://localhost:${PORT}/ws`);
   const built = fs.existsSync(path.join(WEB_DIST, "index.html"));
   if (!built) {
-    console.log(`[VCA-Web] 未检测到前端构建产物，请执行: cd web && npm install && npm run build`);
+    console.log(
+      `[VCA-Web] 未检测到前端构建产物（${WEB_DIST}），请执行: cd web && npm install && npm run build`
+    );
   }
 });

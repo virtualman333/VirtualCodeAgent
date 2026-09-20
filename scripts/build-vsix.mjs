@@ -200,7 +200,8 @@ export function parseArgs(argv) {
 
 function main() {
   const opt = parseArgs(process.argv.slice(2));
-  const webDist = path.join(ROOT, "web", "dist");
+  // 前端产物目录 = web/vite.config.ts 的 build.outDir（唯一来源）
+  const webDist = path.join(ROOT, "dist-electron");
   const webIndex = path.join(webDist, "index.html");
   const extEntry = path.join(ROOT, "vscode", "dist", "extension.js");
 
@@ -220,8 +221,8 @@ function main() {
   }
   if (!fs.existsSync(webIndex)) {
     console.error(
-      `[build-vsix] 缺少 web/dist/index.html。\n` +
-        "    先跑一次 `cd web && npm install && npm run build`，或去掉 --skip-web 让本脚本代劳。"
+      `[build-vsix] 缺少前端产物 ${webIndex}。\n` +
+        "    先跑一次 `npm run build:web`，或去掉 --skip-web 让本脚本代劳。"
     );
     process.exit(1);
   }

@@ -18,8 +18,8 @@
       "filter": ["server.js", "agent/**", "*.js"]
     },
     {
-      "from": "web/dist",
-      "to": "web"
+      "from": "dist-electron",
+      "to": "dist-electron"
     }
   ],
   "win": {
