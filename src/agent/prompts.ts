@@ -5,7 +5,22 @@
  * │   ├── identity / system_behavior / task_execution
  * │   ├── coding_standards / tool_usage / safety / tone_style
  * └── 动态区块 (随会话/环境变化)
- *     ├── env_info / memory / workspace_rules / skills_mcp
+ *     ├── env_info / memory / workspace_rules / tool_catalog
+ *
+ * ★ 工具名不许手抄。
+ * 这一段此前手写了一行「当前内置工具为: read_file / … / todo_*」，并写着
+ * 「Skills/MCP 支持将陆续接入 TS 版」—— 两句话都已经过期：
+ *   · 漏了 spawn_subagent / get_subagent_result / list_subagent_runs
+ *   · 漏了 list_skills / load_skill
+ *   · 而 Skills 与 MCP **早就接入了**（src/skills/manager.ts 与
+ *     src/mcp/manager.ts 都是真实现，工具也真的进了 ALL_TOOLS）
+ * 于是模型在系统提示词里读到的是一份**比真实工具少一半**的清单，还以为自己
+ * 不能派子代理、也没有技能。手抄清单漏了，没有任何东西会响。
+ *
+ * 所以清单改成从 tools/index.js 的 ALL_TOOLS 现算，由**调用方传进来** ——
+ * 本文件不 import 它：那会经 skills/manager 碰到 config.ts 的磁盘副作用
+ * （import 会顺手往真实 ~/.vca/config.json 补写），而本文件是纯叶子模块，
+ * 测试要能脱开磁盘跑。
  */
 import os from "node:os";
 import fs from "node:fs";
@@ -94,12 +109,23 @@ const TOOL_USAGE = `## 工具箱
 - \`todo_update\`   — 更新某步骤状态 (pending/in_progress/completed/failed)
 - \`todo_list\`     — 查看当前计划进度
 
+🎓 专业技能 (Skills):
+- \`list_skills\`   — 看有哪些技能包可用（需要专业领域知识时**先看这里**）
+- \`load_skill\`    — 把某个技能加载进上下文，加载后你就有了它的领域知识和工作流程
+
+🤖 子代理 (Subagent) —— 派出去干活的是**另一个你**，它有自己的上下文，不占用你的：
+- \`spawn_subagent\`      — 派一个子代理去干一件独立的事（调研 / 改一处代码 / 跑测试都能派）
+- \`get_subagent_result\` — 取子代理的结果（派完可以先干别的，回头再来收）
+- \`list_subagent_runs\`  — 看有哪些子代理在跑、哪些跑完了
+
 ### 工具使用偏好
 - 找文件用 \`glob_files\`，找内容用 \`grep_content\`，别用 bash 的 find/grep
 - 读取少量文件用 \`read_file\`，批量/统计用 \`bash\`
 - 修改大段代码用 \`write_file\`，小改动用 \`edit_file\`
 - 涉及 git/包管理/测试，优先 \`bash\`
-- 需要用户决策时用 \`ask_user\`，给出清晰选项而非开放问题`;
+- 需要用户决策时用 \`ask_user\`，给出清晰选项而非开放问题
+- 一件独立的活（调研一处实现、改一处代码、跑一组测试）优先派给 \`spawn_subagent\`：
+  它有自己的上下文，不会把主线的对话塞满；派完记得用 \`get_subagent_result\` 收结果`;
 
 const SAFETY = `## 安全与谨慎操作
 
@@ -172,29 +198,91 @@ function workspaceRules(workspaceDir: string): string {
 - 正式产物 / 业务代码不在此限制内，按用户要求正常写`;
 }
 
-function skillsMcp(): string {
-  return `## 专业技能 (Skills) 与外部工具 (MCP)
-- Skills/MCP 支持将陆续接入 TS 版
-- 当前内置工具为: read_file / glob_files / grep_content / edit_file / write_file / bash / ask_user / todo_*`;
+/**
+ * 已知工具的分类。**它只负责归类，不负责定义谁存在** —— 谁存在由注册表（names）说了算。
+ * 分组的价值是让模型一眼看出工具有哪几族；漏归类的工具不会被吞掉，会落到「尚未归类」那行。
+ */
+const TOOL_GROUPS: ReadonlyArray<readonly [string, readonly string[]]> = [
+  ["阅读与理解", ["read_file", "glob_files", "grep_content"]],
+  ["编写与修改", ["edit_file", "write_file"]],
+  ["执行与验证", ["bash"]],
+  ["用户交互", ["ask_user"]],
+  ["计划管理", ["todo_create", "todo_update", "todo_list"]],
+  ["专业技能", ["list_skills", "load_skill"]],
+  ["子代理", ["spawn_subagent", "get_subagent_result", "list_subagent_runs"]],
+];
+
+// 反引号单独取，免得和下面这些模板串的定界符打架
+const BT = String.fromCharCode(96);
+const mark = (k: string): string => BT + k + BT;
+
+/**
+ * 从真实注册表现算的工具清单。
+ *
+ * 两向都要出声：注册了却没归类的（新加了工具没人管）、归类了却没注册的
+ * （多半是工具改了名，而这张表还指着旧名字）。少任何一向，这张表都会退化成
+ * 「一句听起来很全的话」—— 那正是它上一版的死法。
+ */
+function toolCatalog(names: readonly string[]): string {
+  const registered = new Set(names);
+  const classified = new Set(TOOL_GROUPS.flatMap(([, ks]) => ks));
+  const lines: string[] = [];
+
+  for (const [title, ks] of TOOL_GROUPS) {
+    const present = ks.filter((k) => registered.has(k));
+    if (present.length) lines.push(`- ${title}: ${present.map(mark).join(" / ")}`);
+  }
+
+  const unclassified = names.filter((n) => !classified.has(n));
+  if (unclassified.length) {
+    lines.push(`- 尚未归类（请补进 TOOL_GROUPS）: ${unclassified.map(mark).join(" / ")}`);
+  }
+  const ghosts = [...classified].filter((k) => !registered.has(k));
+  if (ghosts.length) {
+    lines.push(`- ⚠ 清单里有、注册表里没有（多半是改名了）: ${ghosts.map(mark).join(" / ")}`);
+  }
+  if (!names.length) {
+    lines.push("- ⚠ 工具清单为空：调用方没把注册表传进来，这一节此刻不可信");
+  }
+  return lines.join("\n");
+}
+
+function toolsAndSkills(names: readonly string[]): string {
+  return `## 你的工具
+
+下面这份是从注册表现算的（不是你记住的那几个）：
+
+${toolCatalog(names)}
+
+- Skills 与 MCP 都已接入：技能包用 \`list_skills\` / \`load_skill\`；
+  MCP 的外部工具由运行时动态追加，名字以实际注册为准（上面这份只含内置的）。
+- 专业领域的活，先 \`list_skills\` 看一眼有没有现成技能，别硬写。`;
 }
 
 // ============================================================
 // 组装入口
 // ============================================================
 
-export function buildSystemPrompt(workspaceDir: string): string {
+/**
+ * @param workspaceDir 工作目录
+ * @param toolNames    真实注册的工具名（调用方从 tools/index.js 的 ALL_TOOLS 现算）。
+ *   **必填**：传空数组会让模型看到一只空工具箱，所以工具清单那节自己会喊出来
+ *   （见 toolCatalog 的最后一条）。类型上加 required 只是第一道；
+ *   真正拦住「静默空清单」的是那句自白。
+ */
+export function buildSystemPrompt(workspaceDir: string, toolNames: readonly string[]): string {
   const sections = [
     IDENTITY,
     SYSTEM_BEHAVIOR,
     TASK_EXECUTION,
     CODING_STANDARDS,
     TOOL_USAGE,
+    toolsAndSkills(toolNames),
     SAFETY,
     TONE_STYLE,
     envInfo(workspaceDir),
     memory(workspaceDir),
     workspaceRules(workspaceDir),
-    skillsMcp(),
   ];
   return sections.filter((s) => s.trim()).join("\n\n");
 }

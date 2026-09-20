@@ -33,7 +33,8 @@ import { setWorkspace } from "../workspace_ctx.js";
 // ============================================================
 
 export function makeSystemPrompt(workspaceDir: string): string {
-  return buildSystemPrompt(workspaceDir);
+  // 工具清单从注册表现算 —— 提示词里「你的工具」那一节不许手抄（见 prompts.ts 文件头）
+  return buildSystemPrompt(workspaceDir, ALL_TOOLS.map((t) => t.name));
 }
 
 // ============================================================
