@@ -1,9 +1,22 @@
 node_modules/
 dist/
+dist-electron/
+out/
+release/
+coverage/
 *.log
 *.vsix
 .vca/
 .vscode/
+
+# 上面那五条与 tests/source-utils.ts 的 ARTIFACT_DIRS 一一对应，各是哪个工具的落点：
+#   dist-electron/  web/vite.config.ts 的 build.outDir（前端产物）
+#   dist/           tsc 的输出（CLI / server）
+#   release/        electron-builder 的 directories.output（安装包，几百 MB）
+#   out/ coverage/  其它工具的默认落点
+# ⚠ 加进 .gitignore **不会**让已经跟踪的文件脱钩：dist-electron/ 曾经就是这样 ——
+#   14 个产物文件一直躺在版本库里（gitignore 对它形同虚设），直到
+#   tests/artifacts-untracked.test.ts 把「产物目录里不许有被跟踪的文件」变成会响的检查。
 
 # 本项目按 npm 约定（package-lock.json 入库、README 全部为 npm 命令），
 # pnpm-lock.yaml 只是本地 pnpm install 的副产物，不入库

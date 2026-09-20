@@ -402,8 +402,12 @@ export const REPO_ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url
 /**
  * 安装 / 构建产物 —— **定义性排除**，不是「覆盖率清单」。
  * 这里的东西要么是别人装的，要么是构建出来的，永远不属于源码。
+ *
+ * 导出给 `artifacts-untracked.test.ts`：那份测试要求这张表里的每个目录都被
+ * `.gitignore` 覆盖、且**没有被 git 跟踪的文件**。各写一份清单的话，加一个新产物
+ * 目录时两边必然漂 —— 这张表就是唯一来源。
  */
-const ARTIFACT_DIRS = new Set([
+export const ARTIFACT_DIRS = new Set([
   "node_modules",
   "dist",
   "dist-electron",

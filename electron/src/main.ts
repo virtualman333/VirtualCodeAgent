@@ -83,13 +83,14 @@ async function startBackend(): Promise<boolean> {
     return true;
   }
 
-  // 打包后 server.js 在 resources/server; 开发模式在 ROOT/dist
+  // 打包后 server.js 在 resources/server; 开发模式在 ROOT/dist。
+  // 开发侧**只有一条**候选：后端是 `tsc` 的产物（src/server.ts → dist/server.js），
+  // 而 `dist-electron/` 是前端 vite 的 outDir（web/vite.config.ts 的 build.outDir），
+  // 它下面永远不会出现 server.js。以前那条候选是把两个目录当成同一个的残留 ——
+  // 每次启动都白跑一次 existsSync，还会被印进错误对话框，让用户去找一个不可能存在的文件。
   const candidates = app.isPackaged
     ? [path.join(process.resourcesPath, "server", "server.js")]
-    : [
-        path.join(ROOT, "dist", "server.js"),
-        path.join(ROOT, "dist-electron", "server.js"),
-      ];
+    : [path.join(ROOT, "dist", "server.js")];
   log(`[startBackend] 候选: ${JSON.stringify(candidates)}`);
   const serverEntry = candidates.find((p) => fs.existsSync(p));
   if (!serverEntry) {
