@@ -378,3 +378,189 @@ test("★ /agents：真实进程里跑得起来，列出预设且不再说「没
   assert.match(out, /本次会话还没有派过子代理/, "没报出「本会话还没派过」的状态");
   assert.doesNotMatch(out, /尚未接入|还没有 SubAgent|python_legacy/, "/agents 还在说那句谎话");
 });
+
+// ============================================================
+// /history —— 会话记录不能只增不减
+// ============================================================
+//
+// 这一节必须落在子进程层。会话的读/增/删都发生在 main() 里：
+//   - 启动时自动恢复最后一条（restoreSession）
+//   - 每轮交互后、以及 EOF/Ctrl+C 退出时自动保存（autoSave）
+//   - /history del 删的若是**当前**那一条，还得同时清内存里的对话
+// 这三件事的**顺序**才是判据：只删文件不清内存的话，退出时那次自动保存
+// 会把同一份对话写回同一个 id —— 用户看到「已删除」，文件却还在。
+// 纯函数测试盖不到这条路径（session-store 那边只能各测一半）。
+
+const SESSION_FILE = (home: string, id: string): string =>
+  path.join(home, ".vca", "sessions", `${id}.json`);
+const SESSION_INDEX = (home: string): string => path.join(home, ".vca", "session_index.json");
+
+interface SessionSeed {
+  id: string;
+  title: string;
+  /** 写几条消息（默认 2）—— 有消息才会被自动恢复，没有就等于一段空会话 */
+  messages?: number;
+}
+
+/** 种下几个历史会话：`session_index.json` + `sessions/<id>.json` 各写一份（最新在前） */
+function seedSessions(home: string, seeds: SessionSeed[]): void {
+  const dir = path.join(home, ".vca", "sessions");
+  fs.mkdirSync(dir, { recursive: true });
+  const index = seeds.map((s, i) => {
+    const n = s.messages ?? 2;
+    const msgs = Array.from({ length: n }, (_, k) =>
+      k % 2 === 0
+        ? { type: "HumanMessage", content: `${s.title}：第 ${k / 2 + 1} 句` }
+        : { type: "AIMessage", content: "好的" }
+    );
+    fs.writeFileSync(path.join(dir, `${s.id}.json`), JSON.stringify(msgs, null, 2), "utf-8");
+    return {
+      id: s.id,
+      title: s.title,
+      workspace: home,
+      message_count: n,
+      created_at: "2026-09-20 10:00",
+      updated_at: `2026-09-20 ${10 + i}:00`,
+    };
+  });
+  fs.writeFileSync(SESSION_INDEX(home), JSON.stringify(index, null, 2), "utf-8");
+}
+
+function indexedIds(home: string): string[] {
+  const raw = fs.readFileSync(SESSION_INDEX(home), "utf-8");
+  return (JSON.parse(raw) as Array<{ id: string }>).map((e) => e.id);
+}
+
+/** 三个会话，最新在前（`seed-1` 就是启动时会被自动恢复的那一条） */
+const SESSION_SEEDS: SessionSeed[] = [
+  { id: "seed-1", title: "修 redis 超时" },
+  { id: "seed-2", title: "看板样式" },
+  { id: "seed-3", title: "打包 vsix" },
+];
+
+test("★ /history：列出历史会话（最新在前）并给出删除入口", () => {
+  const home = readyHome();
+  seedSessions(home, SESSION_SEEDS);
+  const r = runCommand(home, "/history");
+  assert.equal(r.status, 0, `stderr=${r.stderr}`);
+
+  const out = plain(r.stdout);
+  assert.match(out, /历史会话 · 最近 3 \/ 3 个（最新在前）:/);
+  assert.match(out, /1\. 修 redis 超时 \(2 条消息, 2026-09-20 10:00\)/);
+  assert.match(out, /2\. 看板样式/);
+  assert.match(out, /3\. 打包 vsix/);
+  // 原来这一页只能列：没有任何办法删掉一个会话，粘过密钥的对话永远躺在 ~/.vca/sessions/ 里
+  assert.match(out, /\/history del <序号> 删除/, "必须告诉用户怎么删");
+});
+
+test("★ /history <关键字>：搜标题，如实报出命中数与总数", () => {
+  const home = readyHome();
+  seedSessions(home, SESSION_SEEDS);
+  const r = runCommand(home, "/history redis");
+  assert.equal(r.status, 0, `stderr=${r.stderr}`);
+
+  const out = plain(r.stdout);
+  assert.match(out, /历史会话 · 匹配「redis」 1 \/ 3 个:/);
+  assert.match(out, /1\. 修 redis 超时/);
+  assert.doesNotMatch(out, /打包 vsix/, "没命中的不该出现");
+});
+
+test("/history <关键字>：搜不到时说清楚，而不是打一张空表", () => {
+  const home = readyHome();
+  seedSessions(home, SESSION_SEEDS);
+  const r = runCommand(home, "/history zzz-不存在");
+  assert.match(plain(r.stdout), /没有匹配「zzz-不存在」的历史会话（共 3 个）/);
+});
+
+test("/history <条数>：只截断不改序，并提示还有多少没显示", () => {
+  const home = readyHome();
+  seedSessions(home, SESSION_SEEDS);
+  const r = runCommand(home, "/history 1");
+  assert.match(plain(r.stdout), /历史会话 · 最近 1 \/ 3 个（最新在前）:/);
+  assert.match(plain(r.stdout), /1\. 修 redis 超时/);
+  assert.doesNotMatch(plain(r.stdout), /看板样式/, "只要了 1 条，不该给出第 2 条");
+  assert.match(plain(r.stdout), /…还有 2 个没显示/);
+});
+
+test("★ /history del 2：文件与索引一起删，当前那条不受牵连", () => {
+  const home = readyHome();
+  seedSessions(home, SESSION_SEEDS);
+  const r = runCommand(home, "/history del 2");
+  assert.equal(r.status, 0, `stderr=${r.stderr}`);
+
+  assert.match(plain(r.stdout), /已删除会话/);
+  assert.match(plain(r.stdout), /看板样式/, "要报出删的是哪一个，用户才知道有没有删错");
+  assert.equal(fs.existsSync(SESSION_FILE(home, "seed-2")), false, "会话文件必须真的没了");
+  assert.deepEqual(indexedIds(home), ["seed-1", "seed-3"], "索引里的记录也必须一起删");
+  // 当前窗口是 seed-1（启动时自动恢复的就是它），不该被牵连
+  assert.equal(fs.existsSync(SESSION_FILE(home, "seed-1")), true);
+});
+
+test("★ /history del 1（当前窗口那条）：退出时不许被自动保存写回来", () => {
+  const home = readyHome();
+  seedSessions(home, SESSION_SEEDS);
+  const r = runCommand(home, "/history del 1");
+  assert.equal(r.status, 0, `stderr=${r.stderr}`);
+
+  const out = plain(r.stdout);
+  assert.match(out, /已删除会话/);
+  assert.match(out, /这是当前窗口的会话/, "删掉当前会话要明说内存里那段也一起丢了");
+  assert.equal(
+    fs.existsSync(SESSION_FILE(home, "seed-1")),
+    false,
+    "删完退出时又被自动保存写回来了 —— 用户看到「已删除」，文件却还在"
+  );
+  assert.deepEqual(indexedIds(home), ["seed-2", "seed-3"], "索引里也不该再有它");
+});
+
+test("/history del 不给序号：报用法，什么都不删", () => {
+  const home = readyHome();
+  seedSessions(home, SESSION_SEEDS);
+  const r = runCommand(home, "/history del");
+  assert.equal(r.status, 0, `stderr=${r.stderr}`);
+  assert.match(plain(r.stdout), /用法: \/history del <序号>/);
+  assert.deepEqual(indexedIds(home), ["seed-1", "seed-2", "seed-3"]);
+  for (const s of SESSION_SEEDS) {
+    assert.equal(fs.existsSync(SESSION_FILE(home, s.id)), true, `${s.id} 不该被删`);
+  }
+});
+
+test("/history del <越界序号>：明确报错，且什么都没删", () => {
+  const home = readyHome();
+  seedSessions(home, SESSION_SEEDS);
+  const r = runCommand(home, "/history del 99");
+  assert.match(plain(r.stdout), /无效序号，请输入 1-3/);
+  for (const s of SESSION_SEEDS) {
+    assert.equal(fs.existsSync(SESSION_FILE(home, s.id)), true, `${s.id} 不该被删`);
+  }
+});
+
+test("★ /history：索引外的会话文件也要列出来、也能删（只拷了 sessions/ 目录的用户）", () => {
+  const home = readyHome();
+  seedSessions(home, [{ id: "seed-1", title: "在索引里的" }, { id: "seed-9", title: "只在磁盘上" }]);
+  // 索引里只剩 seed-1：模拟「索引被截断 / 换机器只拷了 sessions/ 目录」
+  const only = JSON.parse(fs.readFileSync(SESSION_INDEX(home), "utf-8"))[0];
+  fs.writeFileSync(SESSION_INDEX(home), JSON.stringify([only], null, 2), "utf-8");
+
+  const listed = runCommand(home, "/history");
+  const out = plain(listed.stdout);
+  assert.match(out, /历史会话 · 最近 2 \/ 2 个（最新在前）:/, "索引外的会话文件也必须出现在列表里");
+  assert.match(out, /未登记/, "要标出「不在索引里」——它没有标题，用户不该以为是空的");
+  assert.match(out, /标「未登记」的 1 个只有会话文件/);
+  assert.match(out, /文件 seed-9\.json/, "把文件名亮出来，用户好在 sessions/ 目录里对上号");
+
+  // 能删 —— 否则这些文件永远只能靠自己开文件管理器找
+  const del = runCommand(home, "/history del 1");
+  assert.match(plain(del.stdout), /已删除会话/);
+  assert.equal(fs.existsSync(SESSION_FILE(home, "seed-1")), false);
+  assert.deepEqual(indexedIds(home), [], "删的正是索引里唯一那条");
+});
+
+test("/help 里能看到 /history 的四行用法（命令清单的唯一来源是 help.ts）", () => {
+  const r = runCli(["--help"], emptyHome());
+  const out = plain(r.stdout);
+  assert.match(out, /\/history \[条数\]/);
+  assert.match(out, /\/history <关键字>/);
+  assert.match(out, /\/history del <序号>/);
+  assert.match(out, /列出 \/ 搜索 \/ 删除历史会话/);
+});

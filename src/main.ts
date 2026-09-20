@@ -14,6 +14,7 @@ import { createInitialState, type AgentState } from "./agent/state.js";
 import { runAgent } from "./agent/runner.js";
 import { selectWorkspace, switchWorkspace } from "./workspace.js";
 import * as storage from "./storage.js";
+import { MAX_INDEXED_SESSIONS, parseHistoryArg, type SessionRow } from "./session-store.js";
 import { installSigintHandler, setInterrupted } from "./interrupt.js";
 import {
   print,
@@ -320,16 +321,54 @@ async function handleCommand(
       break;
     }
     case "/history": {
-      const sessions = storage.listSessions(10);
-      if (sessions.length === 0) {
-        print(dim("暂无历史会话"));
-      } else {
-        print(bold("历史会话:"));
-        sessions.forEach((s, i) => {
-          print(`  ${cyan(String(i + 1))}. ${s.title} ${dim(`(${s.message_count} 条消息, ${s.updated_at})`)}`);
-        });
-        print(dim("用 /load <序号> 恢复某个会话"));
+      // 会话记录此前是个只增不减的暗盒：`/history` 只能列（还写死列 10 条），
+      // `/load <序号>` 又是另一处手抄的 10，没有任何办法删掉一个会话 ——
+      // 而 storage.ts 里 `deleteSession` 一直躺着、零调用（「定义了但全仓没有引用」）。
+      // 粘过密钥 / 走错项目的会话会永远留在 ~/.vca/sessions/ 里，只能自己去文件管理
+      // 器找。参数语义只在 session-store.ts 的 parseHistoryArg 定义一次
+      // （与 /input 同构），这里不自己判「第一个词是不是 del」。
+      const action = parseHistoryArg(userInput.replace(/^\/history\s*/i, ""));
+      if (action.kind === "delete") {
+        deleteHistorySession(action.index, state, cs);
+        break;
       }
+
+      const sel = storage.searchSessions({ limit: action.limit, filter: action.filter });
+      if (sel.total === 0) {
+        print(dim("暂无历史会话。"));
+        print(dim("每轮交互后会自动存一次（/save 可立刻存），存在:"));
+        print(dim(`  ${storage.getSessionsDir()}`));
+        break;
+      }
+      if (sel.matched === 0) {
+        print(dim(`没有匹配「${sel.filter}」的历史会话（共 ${sel.total} 个）`));
+        break;
+      }
+
+      print(
+        sel.filter
+          ? bold(`历史会话 · 匹配「${sel.filter}」 ${sel.matched} / ${sel.total} 个:`)
+          : bold(`历史会话 · 最近 ${sel.shown.length} / ${sel.total} 个（最新在前）:`)
+      );
+      sel.shown.forEach((s, i) => {
+        print(`  ${cyan(String(i + 1).padStart(2))}. ${formatSessionRow(s)}`);
+      });
+      if (sel.matched > sel.shown.length) {
+        print(dim(`  …还有 ${sel.matched - sel.shown.length} 个没显示（/history <条数> 看更多）`));
+      }
+
+      // 索引外的会话文件（索引只留最新的 MAX_INDEXED_SESSIONS 条记录，文件却一直都在）
+      // 必须报出来，否则「文件还在、用户再也看不到它」这件事谁都不会知道。
+      const unregistered = sel.shown.filter((s) => !s.registered).length;
+      if (unregistered > 0) {
+        print(
+          dim(
+            `  标「未登记」的 ${unregistered} 个只有会话文件、不在索引里` +
+              `（索引最多留 ${MAX_INDEXED_SESSIONS} 条）—— 照样能 /load、能删`
+          )
+        );
+      }
+      print(dim("用 /load <序号> 恢复某个会话，/history <关键字> 搜索，/history del <序号> 删除"));
       break;
     }
     case "/input": {
@@ -432,9 +471,72 @@ function setConfigValue(key: string, value: string): void {
   }
 }
 
+/**
+ * 列表里一行怎么显示。
+ *
+ * 「未登记」那类只有会话文件、没有索引记录，于是**条数不知道** —— 这里报
+ * 「条数未知」而不是 `0`。把「没算 / 不知道」显示成 `0`，与本仓库栽过的那些
+ * 界面缺陷是同一个形状：界面不报错，只是安静地少显示一块。
+ */
+function formatSessionRow(s: SessionRow): string {
+  const meta = [
+    s.message_count === null ? "条数未知" : `${s.message_count} 条消息`,
+    s.updated_at,
+  ];
+  if (!s.registered) {
+    meta.push(`文件 ${s.id}.json`);
+    return `${yellow("未登记")} ${dim(`(${meta.join(", ")})`)}`;
+  }
+  return `${s.title} ${dim(`(${meta.join(", ")})`)}`;
+}
+
+/**
+ * `/history del <序号>` —— 序号取自 `/history` 列出的那一份窗口，而窗口大小只有一个
+ * 来源（`storage.getListWindow()`），与 `/load <序号>` 用的是同一个数。
+ *
+ * ⚠ 删的若是**当前窗口**那个会话，内存里那段对话必须一起丢。否则主循环下一轮
+ * 自动保存就把文件原样写回来 —— 用户看到「已删除」，文件其实还在，正是那种
+ * 「看起来干了、其实没干」的坏形态。同理也要清掉子代理运行记录：那份记录是按
+ * 会话算的，留着它，下一个窗口会列出上个窗口派过的子代理。
+ */
+function deleteHistorySession(no: number | null, state: AgentState, cs: CommandState): void {
+  const rows = storage.listSessions(storage.getListWindow());
+  if (no === null) {
+    print(red("用法: /history del <序号>"));
+    print(dim(`序号取自 /history 列出的会话（当前 1-${rows.length}）`));
+    return;
+  }
+  if (no < 1 || no > rows.length) {
+    print(red(`无效序号，请输入 1-${rows.length}`));
+    return;
+  }
+
+  const target = rows[no - 1];
+  const out = storage.deleteSession(target.id);
+  if (out.reason) {
+    print(red(`删除失败: ${out.reason}`));
+    return;
+  }
+
+  const what = [out.file ? "会话文件" : "", out.index ? "索引记录" : ""].filter(Boolean).join(" + ");
+  print(`${green("✓ 已删除会话")} ${formatSessionRow(target)}`);
+  print(dim(`  已删: ${what} (${target.id})`));
+
+  if (cs.sessionId === target.id) {
+    state.messages = [];
+    state.pending_question = null;
+    cs.sessionId = null;
+    getSubagentManager().clear();
+    cs.windowNo = storage.listSessions().length + 1;
+    print(yellow("  这是当前窗口的会话 —— 内存里的对话也一起清掉了（不清的话下一轮自动保存会把它写回来）"));
+  }
+}
+
 function loadSessionByIndex(indexStr: string, state: AgentState, cs: CommandState): string | null {
   const idx = parseInt(indexStr, 10);
-  const sessions = storage.listSessions(10);
+  // 序号窗口必须与 `/history` 是同一个数：各写一份（原来是两处手抄的 10）之后，
+  // 「/history 说用 /load <序号> 恢复」里的序号指的不是同一条会话，而且谁都不报错。
+  const sessions = storage.listSessions(storage.getListWindow());
   if (isNaN(idx) || idx < 1 || idx > sessions.length) {
     print(red(`无效序号，请输入 1-${sessions.length}`));
     return null;

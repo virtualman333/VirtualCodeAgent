@@ -32,6 +32,7 @@ import { fileURLToPath } from "node:url";
 
 import { MAX_HITS } from "../src/completer.js";
 import { HISTORY_MAX, SHOW_DEFAULT } from "../src/input-history.js";
+import { LIST_DEFAULT, MAX_INDEXED_SESSIONS } from "../src/session-store.js";
 import { BENIGN } from "./benign-commands.js";
 
 const ROOT = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
@@ -207,6 +208,24 @@ const README_COUNTS: Array<{ name: string; re: RegExp; truth: () => number; why:
     truth: () => SHOW_DEFAULT,
     why: "README 顺带解释了「为什么是这个数」（一屏看完）；数字变了那个理由就不成立",
   },
+  {
+    name: "`/history` 默认显示个数",
+    re: /列最近 (\d+) 个/,
+    truth: () => LIST_DEFAULT,
+    why: "它与 `/load <序号>` 的序号是同一份窗口 —— 写错了用户会按序号载到别的会话",
+  },
+  {
+    name: "会话索引的条数上限",
+    re: /索引里最多留 (\d+) 条记录/,
+    truth: () => MAX_INDEXED_SESSIONS,
+    why: "这个数决定了「什么时候会有会话滚出索引」；改了它 README 与代码就对不上了",
+  },
+  {
+    name: "`/history` 参数的夹取上界",
+    re: /只看最近 N 个（1 ~ (\d+)）/,
+    truth: () => MAX_INDEXED_SESSIONS,
+    why: "同一个上限在 README 里的第二处写法（`/input` 那一对也是两条）—— 必须同源",
+  },
 ];
 
 /** `N 条` 里那些**不是当前规模**的出现处 —— 实测性叙述 / 示例输出，锁它们等于锁历史 */
@@ -215,6 +234,8 @@ const PROSE_EXCUSED: Array<{ re: RegExp; why: string }> = [
   { re: /实测 21\/21 条如此/, why: "同上：历史实测数据" },
   { re: /输入历史 · 匹配「redis」 2 \/ 5 条/, why: "终端示例输出里的示意数字" },
   { re: /（14 条里只有 `return` 有测试）/, why: "叙述的是这张关键字表**当年**的状态；它当前的大小由 source-utils.test.ts 的宇宙减法钉着" },
+  { re: /硬砍成 \d+ 条/, why: "讲的是会话索引**改之前**那个上限（50），是历史叙述；当前值由「索引里最多留 N 条记录」那条登记项现算" },
+  { re: /从第 21 条会话起/, why: "讲的是**改之前**那个默认值（`listSessions()` 默认只给 20 条）算出来的后果，是历史叙述；现在的默认是「全部」，真值由 session-store.test.ts 现算" },
 ];
 
 test("README 写死的数字：都要对上一个现算真值，且解析面不许腐烂", () => {

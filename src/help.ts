@@ -36,7 +36,7 @@ export const COMMANDS: readonly CommandSpec[] = [
   { name: "/model", usage: "/model", desc: "查看/切换模型 (如 /model deepseek)" },
   { name: "/save", usage: "/save", desc: "保存当前对话" },
   { name: "/load", usage: "/load [序号]", desc: "恢复历史对话" },
-  { name: "/history", usage: "/history", desc: "列出历史会话" },
+  { name: "/history", usage: ["/history", "/history [条数]", "/history <关键字>", "/history del <序号>"], desc: "列出 / 搜索 / 删除历史会话" },
   {
     name: "/input",
     usage: ["/input [条数]", "/input <关键字>", "/input clear"],

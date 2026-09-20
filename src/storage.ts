@@ -1,8 +1,15 @@
 /**
- * 对话记录存储 - 自动保存/恢复会话
+ * 对话记录存储 —— 自动保存 / 恢复会话。
+ *
+ * 这一层只干两件事：**把消息与 BaseMessage 互转**（LangChain 的对象图不能直接
+ * JSON 化），以及**把路径定下来**（`VCA_DIR` 来自 config.ts）。索引、列表、
+ * 搜索、删除那些纯文件逻辑全在 `./session-store.js`，那边目录由调用方传进去，
+ * 所以能被单独测（本文件的 `import "./config.js"` 会在 import 时写
+ * `~/.vca/config.json`，一行都测不得）。
+ *
+ * 拆分的边界就是「要不要碰用户的真实家目录」，与 `paths.ts` / `tools/executable.ts`
+ * 同一个理由。
  */
-import fs from "node:fs";
-import path from "node:path";
 import {
   AIMessage,
   HumanMessage,
@@ -11,10 +18,23 @@ import {
   type BaseMessage,
 } from "@langchain/core/messages";
 
-import { VCA_DIR, SESSIONS_DIR } from "./config.js";
+import { VCA_DIR } from "./config.js";
 import type { AgentState } from "./agent/state.js";
-
-const INDEX_FILE = path.join(VCA_DIR, "session_index.json");
+import {
+  deleteSession as deleteSessionIn,
+  generateSessionId as generateSessionIdIn,
+  listDefault,
+  listSessions as listSessionsIn,
+  nowStr,
+  readSessionFile,
+  searchSessions as searchSessionsIn,
+  sessionsDir,
+  upsertIndex,
+  writeSessionFile,
+  type DeleteOutcome,
+  type SessionRow,
+  type SessionSelection,
+} from "./session-store.js";
 
 // ============================================================
 // 序列化 / 反序列化
@@ -101,72 +121,18 @@ function deserializeMessages(data: MessageDict[]): BaseMessage[] {
 }
 
 // ============================================================
-// 索引管理
+// 对外 API（路径绑定在 VCA_DIR 上）
 // ============================================================
 
-interface SessionEntry {
-  id: string;
-  title: string;
-  workspace: string;
-  message_count: number;
-  created_at: string;
-  updated_at: string;
+/** 会话文件所在目录（`/history` 的提示里会报出来，用户好自己去备份） */
+export function getSessionsDir(): string {
+  return sessionsDir(VCA_DIR);
 }
 
-function readIndex(): SessionEntry[] {
-  try {
-    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-    if (fs.existsSync(INDEX_FILE)) {
-      const data = JSON.parse(fs.readFileSync(INDEX_FILE, "utf-8"));
-      if (Array.isArray(data)) return data as SessionEntry[];
-    }
-  } catch {
-    /* ignore */
-  }
-  return [];
+/** `/history` 与 `/load` 共用的列表窗口大小 —— 只有一个来源，别在命令里写死数字 */
+export function getListWindow(): number {
+  return listDefault();
 }
-
-function writeIndex(index: SessionEntry[]): void {
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-  fs.writeFileSync(INDEX_FILE, JSON.stringify(index, null, 2), "utf-8");
-}
-
-function nowStr(): string {
-  return new Date(Date.now() + 8 * 3600 * 1000).toISOString().replace("T", " ").slice(0, 16);
-}
-
-function updateIndex(sessionId: string, title: string, workspace: string, messageCount: number): void {
-  const now = nowStr();
-  const entry: SessionEntry = {
-    id: sessionId,
-    title,
-    workspace,
-    message_count: messageCount,
-    created_at: now,
-    updated_at: now,
-  };
-
-  const index = readIndex();
-  for (let i = 0; i < index.length; i++) {
-    if (index[i].id === sessionId) {
-      entry.created_at = index[i].created_at;
-      entry.title = index[i].title || title;
-      index[i] = entry;
-      writeIndex(index);
-      return;
-    }
-  }
-  index.unshift(entry);
-  writeIndex(index.slice(0, 50));
-}
-
-function removeFromIndex(sessionId: string): void {
-  writeIndex(readIndex().filter((item) => item.id !== sessionId));
-}
-
-// ============================================================
-// 保存 / 加载 / 管理
-// ============================================================
 
 export function saveSession(
   sessionId: string,
@@ -174,8 +140,6 @@ export function saveSession(
   workspaceDir: string,
   title = ""
 ): string {
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-
   const clean = messages.filter((m) => !isInternalMessage(m));
 
   if (!title) {
@@ -189,24 +153,34 @@ export function saveSession(
   }
 
   const data = serializeMessages(clean);
-  const filepath = path.join(SESSIONS_DIR, `${sessionId}.json`);
-  fs.writeFileSync(filepath, JSON.stringify(data, null, 2), "utf-8");
-  updateIndex(sessionId, title, workspaceDir, clean.length);
+  writeSessionFile(VCA_DIR, sessionId, data);
+
+  // 时间戳的写法只有一处（session-store.nowStr）—— 这里原来又拼了一遍
+  // `new Date(Date.now() + 8*3600*1000).toISOString()...`：索引里的 created_at
+  // 与 updated_at 一旦分头改格式，界面上那两个时间就会长得不一样
+  const now = nowStr();
+  upsertIndex(VCA_DIR, {
+    id: sessionId,
+    title,
+    workspace: workspaceDir,
+    message_count: clean.length,
+    created_at: now,
+    updated_at: now,
+  });
   return sessionId;
 }
 
-export function loadSession(sessionId: string): { messages: BaseMessage[]; workspace_dir: string; title: string } | null {
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-  const filepath = path.join(SESSIONS_DIR, `${sessionId}.json`);
-  if (!fs.existsSync(filepath)) return null;
-
+export function loadSession(
+  sessionId: string
+): { messages: BaseMessage[]; workspace_dir: string; title: string } | null {
+  if (!/^[A-Za-z0-9_-]+$/.test(String(sessionId ?? ""))) return null;
   try {
-    const data = JSON.parse(fs.readFileSync(filepath, "utf-8")) as MessageDict[];
+    const data = readSessionFile(VCA_DIR, sessionId) as MessageDict[];
     const messages = deserializeMessages(data);
 
     let workspace = "";
     let title = "";
-    for (const item of readIndex()) {
+    for (const item of listSessionsIn(VCA_DIR)) {
       if (item.id === sessionId) {
         workspace = item.workspace;
         title = item.title;
@@ -219,27 +193,26 @@ export function loadSession(sessionId: string): { messages: BaseMessage[]; works
   }
 }
 
-export function listSessions(maxCount = 20): SessionEntry[] {
-  return readIndex().slice(0, maxCount);
+/**
+ * 会话列表：索引里有的 + **索引外的会话文件**。
+ *
+ * 不传 `maxCount` 是全部 —— 数总数的地方（窗口号、序号范围）不能被截断，
+ * 要截断只在显示时截一次。
+ */
+export function listSessions(maxCount?: number): SessionRow[] {
+  return listSessionsIn(VCA_DIR, maxCount);
 }
 
-export function deleteSession(sessionId: string): boolean {
-  fs.mkdirSync(SESSIONS_DIR, { recursive: true });
-  const filepath = path.join(SESSIONS_DIR, `${sessionId}.json`);
-  let deleted = false;
-  if (fs.existsSync(filepath)) {
-    fs.rmSync(filepath);
-    deleted = true;
-  }
-  removeFromIndex(sessionId);
-  return deleted;
+export function searchSessions(opts: { limit?: number; filter?: string } = {}): SessionSelection {
+  return searchSessionsIn(VCA_DIR, opts);
+}
+
+export function deleteSession(sessionId: string): DeleteOutcome {
+  return deleteSessionIn(VCA_DIR, sessionId);
 }
 
 export function generateSessionId(): string {
-  const now = new Date(Date.now() + 8 * 3600 * 1000);
-  const stamp =
-    now.toISOString().replace(/[-:]/g, "").replace(/[T.]/g, "_").slice(0, 15);
-  return `${stamp}_${Math.floor(Math.random() * 100000)}`;
+  return generateSessionIdIn();
 }
 
 export function getLastSession(): { messages: BaseMessage[]; workspace_dir: string; title: string } | null {

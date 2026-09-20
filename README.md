@@ -53,6 +53,8 @@ VCA 是一个以 TypeScript 重写的编码 Agent，底层用 [LangGraph.js](htt
 │   ├── input-history.ts # ↑/↓ 输入历史（读写 ~/.vca/input_history）
 │   ├── ui.ts            # ANSI 颜色 / 面板 / 显示宽度 / Markdown 渲染
 │   ├── version.ts       # 版本号读取（唯一来源是 package.json，源码里不抄第二份）
+│   ├── storage.ts       # 会话持久化：消息 ↔ JSON，路径绑定在 VCA_DIR 上
+│   ├── session-store.ts # 会话索引 / 列表 / 搜索 / 删除（零依赖，目录由调用方传入，可单测）
 │   ├── main.ts          # 控制台 CLI 入口
 │   ├── server.ts        # HTTP + WebSocket 服务（供 Web 使用）
 │   └── workspace*.ts    # 工作空间选择与管理
@@ -141,7 +143,8 @@ npm run dev -- --version             # 查看版本号
 | `/agents` | 子代理：可用预设 + 本次会话派过的子代理与运行状态 |
 | `/config set K V` | 修改配置 |
 | `/model [名称\|序号]` | 查看 / 切换模型 |
-| `/save` `/load [序号]` `/history` | 保存 / 恢复 / 列出会话 |
+| `/save` `/load [序号]` | 保存 / 恢复历史会话（序号取自 `/history` 列出的那一份） |
+| `/history [条数\|关键字\|del <序号>]` | 查看 / 搜索 / 删除历史会话 |
 | `/input [条数\|关键字\|clear]` | 查看 / 搜索 / 清空输入历史（`↑` 翻的那些） |
 | `/exit` | 退出 |
 
@@ -202,6 +205,34 @@ npm run dev -- --version             # 查看版本号
 - **清空先清内存、再落盘**，且 `clearHistory` 是**原地清空并返回同一个引用** —— 只清一边都不算清（只清文件 `↑` 还翻得出来，只清内存重启全回来）。
 
 > 顺带一个已知限制：`promptUser` 每次读取一行后就关掉 readline，所以**把多行文本一次性粘贴进输入框只有第一行会生效**。这与本轮改动无关（原本如此），记在这里免得下次又当成新 bug 查一遍。
+
+#### `/history`：会话也不该只是个「第几个」的暗盒
+
+会话（`~/.vca/sessions/<id>.json`）此前只有两个动作：`/history` 把它列出来、`/load <序号>` 进去。三件事都不成立：
+
+- **只能增不能减**。`src/storage.ts` 里 `deleteSession` 一直躺着、**零调用** —— 粘过 API Key、或聊错项目的会话会永远留在 `~/.vca/sessions/` 里，唯一的删法是自己去文件管理器翻。搜索也没有，会话攒多了只能一条条 `/load` 试。
+- **序号窗口手抄在两处**。`/history` 列 `listSessions(10)`，`/load <序号>` 也读 `listSessions(10)` —— 同一个 `10` 写了两遍，而 `listSessions()` 的默认值又是 `20`。于是提示符上那个窗口号（`cs.windowNo`）**从第 21 条会话起永远停在 `#21`**：不报错，只是那个数字不再变了。
+- **索引外的会话会静默消失**。索引写盘时硬砍成 50 条，被砍掉的会话文件还在磁盘上，却既列不出来、也载不回来。
+
+现在：
+
+| 敲法 | 行为 |
+|---|---|
+| `/history` | 列最近 10 个，最新在前，序号与 `/load <序号>` 一一对应 |
+| `/history <条数>` | 只看最近 N 个（1 ~ 500），超出部分提示还有多少个没显示 |
+| `/history <关键字>` | **子串**匹配（不区分大小写）**标题与工作空间**两栏，并如实报出「命中 N / 共 M」 |
+| `/history del <序号>` | 删除：**会话文件与索引记录一起删** |
+
+四条约定：
+
+- **索引只是缓存，真值永远是 `sessions/*.json`**。两者可以不一致（索引里最多留 500 条记录，超出时最旧的滚出索引；也可能被手删过，或者换机器只拷了 `sessions/` 目录），所以列表 = 索引条目 **+ 索引外的会话文件** —— 后者标成「未登记」并把文件名亮出来，照样能 `/load`、能 `/history del`。把它们藏起来才是真正不可接受的：用户再也找不回自己的对话，而且不会看到任何报错。
+- **`del` 只删一条**，不提供「清空全部」。一次手滑删掉所有会话不可逆；`/input clear` 敢一把清空，是因为它清掉的是「敲过的命令」那种可再生数据。
+- **删的若是当前窗口那一条，内存里的对话也一起丢**。否则主循环下一轮自动保存就把同一份对话写回同一个 id —— 用户看到「已删除」，文件却还在。这一条有端到端测试钉着（退出时那次自动保存真的不会再写进那个 id）。
+- **参数语义只有一处**。`''` → 列表、正整数 → 条数、`del <序号>` → 删除、其余一律当关键字，全由 `src/session-store.ts` 的 `parseHistoryArg` 决定（与 `/input` 的 `parseInputArg` 同构）；命令里只在**解析结果**上分支，不自己判一次 `del`。列表窗口同理：`/history` 与 `/load` 共用一个 `storage.getListWindow()`，两处各写一个 `10` 就会各走各的。
+
+> 会话与输入历史是**两回事**：`~/.vca/input_history` 存的是「敲过什么」（一条条输入，可跨会话翻），`~/.vca/sessions/` 存的是「聊过什么」。前者与 Python 版共用同一个文件，后者是本仓库自己的格式。
+>
+> 这一层的逻辑单独放在零依赖的 `src/session-store.ts`（目录由调用方传入），所以能被单测跑在临时目录上 —— `storage.ts` 会 `import config.ts`，而后者在 import 时就真写 `~/.vca/config.json`。同一个理由先前已经拆出过 `paths.ts` 与 `tools/executable.ts`。
 
 #### 子代理：把一件子任务派出去做完
 
@@ -467,7 +498,7 @@ npm run check         # typecheck:test + test
 
 测试分两层：
 
-- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` / `tests/ui.test.ts` / `tests/version.test.ts` / `tests/electron-boot.test.ts` / `tests/source-utils.test.ts` / `tests/ansi-source.test.ts` / `tests/subagents.test.ts` / `tests/agents-command.test.ts` / `tests/workspace-ctx.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则（含与 prompt_toolkit 的**格式往返** —— 把官方 `FileHistory.load_history_strings()` 的读取算法照抄进测试当契约，而不是拿自家实现的假设去测自家实现）、控制台宽度的口径（`panel` 每一行的显示宽度只有一个值、窄终端才截断、`📋` 算 2 列而 `⚡` 算 1 列）、Markdown 表格（中文列也对齐、已经对齐的表格再渲染一遍不再变、带竖线的命令行不会被吃成表格、`\|` 转义后能原样读回来、超宽表格按面板宽度收窄后不被 `panel` 二次截断、超宽单元格折行后一个字都不丢且反复渲染不会越长越高、连「列数 × 3 列」都放不下时兜底输出也折行）、版本号只有一个读取处（含界面与文档 —— 侧栏写死过版本号，一直没人核对）、桌面端地址拼装（没有 host 时用主进程报的端口，拿不到就返回 `null` 而不是拼出 `ws:///ws`）、子代理的工具白名单与派发计划（含两条结构锁：被封锁的工具名**即使出现在可用列表里也必须被拒**，白名单必须**同时**管住绑给模型的和 `ToolNode` 能执行的两份 —— 只过滤前者的话白名单就是假锁）、工作目录上下文的还原（同步 / 异步 resolve / 异步 reject / 同步 throw 四条出口逐条钉住，另有一条反向对照证明「不包裹时确实会泄漏」）。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据 —— 同一条理由也让「哪些工具能进 `ToolNode`」这条判定从 `tools/index.ts` 拆到了零依赖的 `tools/executable.ts`，好让它可以被单独测。
+- `tests/cli-args.test.ts` / `tests/help.test.ts` / `tests/completer.test.ts` / `tests/input-history.test.ts` / `tests/ui.test.ts` / `tests/version.test.ts` / `tests/electron-boot.test.ts` / `tests/source-utils.test.ts` / `tests/ansi-source.test.ts` / `tests/subagents.test.ts` / `tests/agents-command.test.ts` / `tests/workspace-ctx.test.ts` / `tests/session-store.test.ts` —— 纯函数层。参数解析的每条错误分支、命令清单与 `handleCommand` 的双向一致性、Tab 补全的候选与 token、历史文件的读写与去重规则（含与 prompt_toolkit 的**格式往返** —— 把官方 `FileHistory.load_history_strings()` 的读取算法照抄进测试当契约，而不是拿自家实现的假设去测自家实现）、控制台宽度的口径（`panel` 每一行的显示宽度只有一个值、窄终端才截断、`📋` 算 2 列而 `⚡` 算 1 列）、Markdown 表格（中文列也对齐、已经对齐的表格再渲染一遍不再变、带竖线的命令行不会被吃成表格、`\|` 转义后能原样读回来、超宽表格按面板宽度收窄后不被 `panel` 二次截断、超宽单元格折行后一个字都不丢且反复渲染不会越长越高、连「列数 × 3 列」都放不下时兜底输出也折行）、版本号只有一个读取处（含界面与文档 —— 侧栏写死过版本号，一直没人核对）、桌面端地址拼装（没有 host 时用主进程报的端口，拿不到就返回 `null` 而不是拼出 `ws:///ws`）、子代理的工具白名单与派发计划（含两条结构锁：被封锁的工具名**即使出现在可用列表里也必须被拒**，白名单必须**同时**管住绑给模型的和 `ToolNode` 能执行的两份 —— 只过滤前者的话白名单就是假锁）、工作目录上下文的还原（同步 / 异步 resolve / 异步 reject / 同步 throw 四条出口逐条钉住，另有一条反向对照证明「不包裹时确实会泄漏」）。补全与历史都**不 import `config.ts`**（那会在 import 时就写下真实的 `~/.vca/config.json`），文件路径全部由调用方传入，所以这一层跑在临时目录上，不碰用户的任何数据 —— 同一条理由也让「哪些工具能进 `ToolNode`」这条判定从 `tools/index.ts` 拆到了零依赖的 `tools/executable.ts`，好让它可以被单独测。
 - `tests/cli-spawn.test.ts` —— 入口冒烟层。**真的把 CLI 当子进程跑起来**，断言 stdout / stderr / 退出码。这一层存在的理由：上一轮那个「入口守卫在 Windows 上永不成立、`npm run dev` 一行输出都没有」的故障，在所有纯函数测试里都是绿的 —— 被测函数一个都没被调用。判据很朴素：**stdout 是空的就说明 `main()` 压根没跑**。启动面板的对齐也量在这里：喂假数据量不出「终端列数 + 真实内容」组合出来的宽度。
 
 - 所有「读源码做断言」的结构锁共用一个地基：`tests/source-utils.ts` 的 `stripComments`（此前 `tests/` 下有三份拷贝，一起漂移）。它的契约只有一句 —— **只丢注释，别的一律原样保留**。两条会破坏契约的词法各栽过一次，每次的后果都不是「锁松了一点」而是**锁判错**：字符串里的 `//`（URL 的 `://` 一出现，「`ws://` 只有一处」这类锁就对写坏的代码判绿）；**正则字面量里的引号/反引号**（本仓库那两条匹配行内代码与加粗的正则就把反引号写进了字符类，`src/ui.ts` 与 `vscode/src/panel.ts` 实测中招 —— 扫描器在正则的引号处失步后，**从那一行起注释不再被剥**，注释里的反面示例又被当成实现，连栽过的假红原地复活）。`tests/source-utils.test.ts` 逐形态钉住这些边界，另有一条总闸：**全仓源码剥完后不得残留任何注释行** —— 任何新词法让扫描器失步都会在那里现形，不必事先枚举触发形态。
